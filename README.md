@@ -75,10 +75,16 @@ python scripts/parse_docx_debug.py tasks/7.12
 
 ## 输出产物（`output/<任务名>/`）
 
-- `grading_detail.jsonl`：每行评分明细（维度分项+扣分+置信度+理由），断点续跑的数据源
+- `<原名>_AI评分.xlsx`：**AI 评分与人工改分的写入目标**（首次跑批时从原始 xlsx 复制）
+- `grading_detail.jsonl`：每行评分明细（维度分项+扣分+置信度+理由+题目描述+学生代码），断点续跑的数据源
+- `human_override.jsonl`：人工改分流水（可追溯、可撤销）
 - `review_queue.csv`：待复核清单（低置信度行 + 抓取失败行）
 - `verification_report.txt`：一致性验证报告
+- `run.log`：跑批日志（GUI 跑批时落盘，追加模式）
 - `render_dumps/`：抓取调试转储（默认仅失败时写）
+
+> **`tasks/<任务名>/` 下的原始 xlsx 全程只读**，不会被写入。它含真人评分，
+> 既是交付基准，也是一致性验证的对比来源——写入会让 AI 分覆盖人工分、偏差恒为 0。
 
 ## 关键设计
 
@@ -87,6 +93,7 @@ python scripts/parse_docx_debug.py tasks/7.12
 - 题目识别缓存仅进程内（题目ID 跨月不稳定）
 - temperature=0，评分可复现
 - 验证模式 `skip_score=True`，从数据结构层面保证工具不看 G 列
+- AI 评分写 output 下的独立副本，原始 xlsx 只读
 - 默认 DeepSeek（成本低），Claude/OpenAI 可切换
 
-详见 `prd.txt`。
+详见 `prd.md`。

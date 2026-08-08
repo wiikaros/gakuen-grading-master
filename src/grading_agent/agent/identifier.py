@@ -78,7 +78,7 @@ class ProblemIdentifier:
             # 参考代码片段
             try:
                 bundle = self.stdlib.get(result.best_triple)
-                code_lines = bundle.reference_code.splitlines()[:5]
+                code_lines = bundle.reference_code.splitlines()[:10]
                 print_fn("  参考代码片段:")
                 for cl in code_lines:
                     print_fn(f"    {cl}")

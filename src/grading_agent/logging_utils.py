@@ -15,8 +15,19 @@ from typing import Iterable
 from grading_agent.models import GradeResult, TaskRow
 
 
-def write_grade_detail(path: Path, row: TaskRow, result: GradeResult, timestamp: str = "") -> None:
+def write_grade_detail(
+    path: Path,
+    row: TaskRow,
+    result: GradeResult,
+    timestamp: str = "",
+    description: str = "",
+    student_code: str = "",
+) -> None:
     """追加一行 JSONL：行号/答卷ID/题目ID/三元组/维度分项/扣分/总分/置信度/理由/时间戳。
+
+    另存抓取到的题目描述与学生代码（description/student_code），
+    使复核界面无需重新抓取即可查看原始答卷——重抓一次要几秒且占用浏览器，
+    存下来后浏览历史结果是纯本地读取。
 
     每次写入后 flush，保证断点续跑时 JSONL 是可靠的恢复源。
     """
@@ -26,6 +37,8 @@ def write_grade_detail(path: Path, row: TaskRow, result: GradeResult, timestamp:
         "answer_id": row.answer_id,
         "task_id": row.task_id,
         "triple": str(result.triple),
+        "description": description,
+        "student_code": student_code,
         "dimension_scores": [
             {"name": d.name, "awarded": d.awarded, "max_score": d.max_score, "reasoning": d.reasoning}
             for d in result.dimension_scores

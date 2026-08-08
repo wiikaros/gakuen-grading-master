@@ -13,11 +13,13 @@ from __future__ import annotations
 import datetime as _dt
 import shutil
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from grading_agent.config import Config
+from grading_agent.ai_xlsx import ensure_ai_xlsx
 from grading_agent.logging_utils import (
     read_completed_rows,
     read_triple_map_from_detail,
@@ -104,6 +106,9 @@ class Orchestrator:
         verify: bool = False,
         input_fn: Callable = input,
         print_fn: Callable = print,
+        event_fn: Callable[[dict], None] | None = None,
+        should_stop: "threading.Event | None" = None,
+        output_root: Path | None = None,
     ) -> None:
         self.task_dir = task_dir
         self.config = config
@@ -113,10 +118,15 @@ class Orchestrator:
         self.verify = verify
         self.input_fn = input_fn
         self.print_fn = print_fn
+        self.event_fn = event_fn
+        self.should_stop = should_stop
+        # 阶段 A 构建后暴露给 GUI（确认弹窗要显示候选与参考代码）
+        self.stdlib: StandardLibrary | None = None
 
         # 输出目录
         task_name = task_dir.name
-        self.output_dir = Path("output") / task_name
+        root = output_root if output_root is not None else Path("output")
+        self.output_dir = root / task_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.detail_log_path = self.output_dir / config.output.detail_log
         self.review_queue_path = self.output_dir / config.output.review_queue
@@ -142,10 +152,29 @@ class Orchestrator:
     def _log(self, msg: str) -> None:
         self.print_fn(msg)
 
+    def _emit(self, event_type: str, **payload: Any) -> None:
+        """发结构化事件给 GUI。event_fn 未注入时（CLI）静默跳过。
+
+        与 _log 并存：_log 面向人读的文本，_emit 面向程序消费的 dict。
+        GUI 用 _emit 驱动进度条/统计，不必正则解析日志文本。
+        """
+        if self.event_fn is None:
+            return
+        try:
+            self.event_fn({"type": event_type, **payload})
+        except Exception:
+            # GUI 回调异常不得影响跑批主流程
+            pass
+
+    def _stop_requested(self) -> bool:
+        """GUI 是否请求停止。CLI 下 should_stop 为 None，恒返回 False。"""
+        return self.should_stop is not None and self.should_stop.is_set()
+
     def run(self) -> RunReport:
         """执行阶段 A-D。"""
         # ── 阶段 A：启动准备 ──
         self._log("[阶段A] 启动准备")
+        self._emit("phase", phase="A", label="启动准备")
         try:
             xlsx_path = _find_xlsx(self.task_dir)
             level1_path = _find_docx(self.task_dir, "一级")
@@ -160,12 +189,26 @@ class Orchestrator:
         self._log(f"  二级标准: {level2_path.name}")
         self._log(f"  参考代码: {ref_path.name}")
 
-        # 读 xlsx
+        # 读 xlsx。注意：读原始表拿行数据，但**写入目标是 output 下的 AI 评分副本**，
+        # 原始表全程只读——它含真人评分，既是交付物也是一致性验证的基准。
         try:
             rows, layout, wb = read_rows(xlsx_path, skip_score=True)
         except ValueError as e:
             self._log(f"❌ xlsx 列定位失败: {e}")
             return self._fail_report()
+
+        # 准备 AI 评分副本（verify 模式不写盘，故不需要）
+        ai_xlsx: Path | None = None
+        if not self.verify:
+            ai_xlsx = ensure_ai_xlsx(xlsx_path, self.output_dir)
+            # 续跑时应基于副本已有内容，而不是拿原始表覆盖回去
+            try:
+                _rows2, layout, wb = read_rows(ai_xlsx, skip_score=True)
+            except ValueError as e:
+                self._log(f"❌ AI 评分副本列定位失败: {e}")
+                return self._fail_report()
+            self._log(f"  AI 评分写入: {ai_xlsx}")
+            self._log(f"  原始 xlsx 只读，不会被修改")
 
         # 收集题目ID
         task_ids = []
@@ -175,6 +218,8 @@ class Orchestrator:
                 seen.add(r.task_id)
                 task_ids.append(r.task_id)
         self._log(f"  读取 {len(rows)} 行，{len(task_ids)} 个题目ID: {task_ids}")
+        self._emit("xlsx_loaded", total_rows=len(rows), task_ids=list(task_ids),
+                   xlsx_name=xlsx_path.name)
 
         # 构建标准库
         try:
@@ -183,6 +228,7 @@ class Orchestrator:
             self._log(f"❌ 标准库构建失败: {e}")
             return self._fail_report()
         gradable = stdlib.gradable_triples()
+        self.stdlib = stdlib
         self._log(f"  构建标准库: {len(stdlib.all_triples())} 道参考题, {len(gradable)} 条可评标准")
 
         # 冒烟测试：每个题目ID 抽 1 个 URL 预抓取
@@ -191,6 +237,7 @@ class Orchestrator:
 
         # ── 阶段 B：题目识别 ──
         self._log("\n[阶段B] 题目识别")
+        self._emit("phase", phase="B", label="题目识别")
         triple_map: dict[str, TaskTriple] = {}
 
         if self.skip_identification:
@@ -228,8 +275,17 @@ class Orchestrator:
                 if not first_row:
                     continue
                 self._log(f"\n  处理题目ID={tid}")
-                confirmed, id_result, fetch_result = identifier.identify_and_confirm(
-                    tid, first_row.url, self.input_fn, self.print_fn,
+                # 先识别（不交互），把题目描述发给 GUI 供确认弹窗显示，再走确认
+                id_result, fetch_result = identifier.identify(tid, first_row.url)
+                self._emit("identify_ready", task_id=tid,
+                           description=fetch_result.description or "",
+                           code=fetch_result.code or "",
+                           best_triple=str(id_result.best_triple),
+                           confidence=id_result.confidence,
+                           reasoning=id_result.reasoning,
+                           fetch_ok=fetch_result.ok)
+                confirmed = identifier.confirm_with_user(
+                    tid, id_result, fetch_result, self.input_fn, self.print_fn,
                 )
                 if confirmed is None:
                     triple_map[tid] = None  # type: ignore[assignment]
@@ -239,6 +295,7 @@ class Orchestrator:
 
             # ── 阶段 C：批量评分 ──
             self._log("\n[阶段C] 批量评分")
+            self._emit("phase", phase="C", label="批量评分")
             grader = Grader(fetcher, backend, stdlib)
             state = _RunState()
 
@@ -253,7 +310,14 @@ class Orchestrator:
                 self._log(f"  --max-rows: 仅处理前 {self.max_rows} 行")
 
             total = len(target_rows)
+            self._emit("grading_start", total=total, skipped=len(completed_rows))
             for idx, row in enumerate(target_rows, start=1):
+                # GUI 停止请求：JSONL 已逐行 flush，重跑可断点续跑
+                if self._stop_requested():
+                    self._log("\n  ⚠ 已请求停止，中断批量评分（已完成行已写入 JSONL）")
+                    self._emit("stopped", at_index=idx, total=total)
+                    break
+
                 # 断点续跑跳过
                 if row.row_num in completed_rows:
                     continue
@@ -272,6 +336,9 @@ class Orchestrator:
 
                 # 进度显示
                 self._log(f"  [{idx}/{total}] 行{row.row_num} 题目ID={row.task_id} ... ", )
+                self._emit("row_start", index=idx, total=total,
+                           row_num=row.row_num, task_id=row.task_id,
+                           answer_id=row.answer_id, triple=str(triple))
                 result, fetch_result = grader.fetch_and_grade(row.url, triple, row_id=str(row.row_num))
 
                 if not fetch_result.ok:
@@ -286,6 +353,12 @@ class Orchestrator:
                     })
                     state.low_confidence_queued += 1
                     self._log(f"抓取✗ → 留空")
+                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
+                               task_id=row.task_id, answer_id=row.answer_id,
+                               outcome="fetch_failed", written=False,
+                               total_score=None, confidence=0.0,
+                               error=fetch_result.error or "",
+                               stats=self._stats(state))
                 elif not result.parse_ok:
                     state.fetch_failed_streak = 0
                     state.llm_failed_streak += 1
@@ -297,6 +370,12 @@ class Orchestrator:
                     })
                     state.low_confidence_queued += 1
                     self._log(f"LLM✗ → 留空")
+                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
+                               task_id=row.task_id, answer_id=row.answer_id,
+                               outcome="llm_parse_failed", written=False,
+                               total_score=None, confidence=result.confidence,
+                               error=result.reasoning,
+                               stats=self._stats(state))
                 else:
                     state.fetched_ok += 1
                     state.fetch_failed_streak = 0
@@ -308,15 +387,22 @@ class Orchestrator:
                     except KeyError:
                         bundle_total_max = "?"
                     # 写 JSONL（无论是否写回 xlsx，都记明细）
-                    write_grade_detail(self.detail_log_path, row, result, _timestamp())
+                    # 一并存下题目描述与学生代码，复核界面即可离线查看，无需重抓
+                    write_grade_detail(
+                        self.detail_log_path, row, result, _timestamp(),
+                        description=fetch_result.description or "",
+                        student_code=fetch_result.code or "",
+                    )
                     if high and not self.verify:
                         # 高置信度：写回内存中的 xlsx
                         update_cell_in_memory(wb.active, row.row_num, layout.score_col_idx, result.total_score)
                         state.high_confidence_written += 1
                         self._log(f"评分: {result.total_score}/{bundle_total_max} (conf {result.confidence:.2f}) → 写回")
+                        _outcome, _written = "written", True
                     elif high and self.verify:
                         state.high_confidence_written += 1
                         self._log(f"评分: {result.total_score} (conf {result.confidence:.2f}) → [verify] 不写回")
+                        _outcome, _written = "verify_ok", False
                     else:
                         state.low_confidence_queued += 1
                         state.review_rows.append({
@@ -326,11 +412,19 @@ class Orchestrator:
                             "reason": "low_confidence", "reasoning": result.reasoning,
                         })
                         self._log(f"评分: {result.total_score} (conf {result.confidence:.2f}) → ⚠ 留空")
+                        _outcome, _written = "low_confidence", False
 
-                # 定期 save xlsx（非 verify 模式）
-                if not self.verify and idx % self.config.grading.xlsx_save_interval == 0:
+                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
+                               task_id=row.task_id, answer_id=row.answer_id,
+                               outcome=_outcome, written=_written,
+                               total_score=result.total_score,
+                               confidence=result.confidence,
+                               error="", stats=self._stats(state))
+
+                # 定期 save xlsx（非 verify 模式）——写 AI 副本，不碰原始表
+                if not self.verify and ai_xlsx is not None and idx % self.config.grading.xlsx_save_interval == 0:
                     try:
-                        save_workbook(wb, xlsx_path)
+                        save_workbook(wb, ai_xlsx)
                     except Exception as e:
                         self._log(f"  ⚠ 定期 save 失败: {e}")
 
@@ -341,11 +435,12 @@ class Orchestrator:
 
             # ── 阶段 D：收尾 ──
             self._log("\n[阶段D] 收尾")
-            output_xlsx_path = xlsx_path
-            if not self.verify:
+            self._emit("phase", phase="D", label="收尾")
+            output_xlsx_path = ai_xlsx if ai_xlsx is not None else xlsx_path
+            if not self.verify and ai_xlsx is not None:
                 try:
-                    output_xlsx_path = save_workbook(wb, xlsx_path)
-                    self._log(f"  xlsx 已保存: {output_xlsx_path}")
+                    output_xlsx_path = save_workbook(wb, ai_xlsx)
+                    self._log(f"  AI 评分 xlsx 已保存: {output_xlsx_path}")
                 except Exception as e:
                     self._log(f"  ❌ 保存 xlsx 失败: {e}")
 
@@ -366,7 +461,26 @@ class Orchestrator:
             self._log(f"\n  已写回评分: {report.high_confidence_written} 行 (高置信度)")
             self._log(f"  待复核: {report.low_confidence_queued} 行")
             self._log(f"  抓取失败: {report.fetch_failed} 行")
+            self._emit("finished",
+                       total_rows=report.total_rows,
+                       fetched_ok=report.fetched_ok,
+                       fetch_failed=report.fetch_failed,
+                       high_confidence_written=report.high_confidence_written,
+                       low_confidence_queued=report.low_confidence_queued,
+                       detail_log_path=str(report.detail_log_path),
+                       review_queue_path=str(report.review_queue_path),
+                       output_xlsx_path=str(report.output_xlsx_path),
+                       stopped=self._stop_requested())
             return report
+
+    def _stats(self, state: "_RunState") -> dict:
+        """当前累计统计快照，随每个 row_done 事件带给 GUI。"""
+        return {
+            "fetched_ok": state.fetched_ok,
+            "fetch_failed": state.fetch_failed,
+            "high_confidence_written": state.high_confidence_written,
+            "low_confidence_queued": state.low_confidence_queued,
+        }
 
     def _smoke_test(self, rows: list[TaskRow], task_ids: list[str]) -> bool:
         """阶段 A 冒烟测试：每个题目ID 抽 1 个 URL 预抓取，验证连通性。
