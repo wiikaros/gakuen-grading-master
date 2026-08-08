@@ -1,0 +1,11 @@
+langchain>=0.3,<0.4
+langchain-openai>=0.2          # DeepSeek 走 OpenAI 兼容 + OpenAI 原生
+langchain-anthropic>=0.3       # Claude 可选
+langchain-core>=0.3
+langchain-community>=0.3       # JsonOutputParser 降级方案
+openpyxl>=3.1
+python-docx>=1.1
+playwright>=1.40
+pydantic>=2.0                  # 结构化输出 schema
+pyyaml>=6.0                    # config/default.yaml
+python-dotenv>=1.0             # .env 加载

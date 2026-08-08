@@ -1,0 +1,75 @@
+# ============================================================
+# 隐私优先：本项目处理学生个人信息与答卷内容，请勿放宽以下规则
+# ============================================================
+
+# ── 1. 凭证：API key ──────────────────────────────────────
+# .env 含 DEEPSEEK/OPENAI/ANTHROPIC 的 API key，切勿提交。
+# 只有 .env.example（占位符模板）应当入库。
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+secrets.yaml
+secrets.yml
+
+# ── 2. 学生个人信息与阅卷人身份 ───────────────────────────
+# tasks/ 下的 xlsx 含用户ID/答卷ID/赛区ID/答卷链接，
+# 且文件名本身可能带阅卷人真实姓名。整个目录排除。
+tasks/
+prd.md
+
+# 保险起见：任何位置的表格与文档都不入库
+# （评分标准/参考代码 docx 属教学资料，与含个人信息的 xlsx 同源，一并排除）
+*.xlsx
+*.xls
+*.xlsm
+*.docx
+*.doc
+*.csv
+# Excel 打开文件时产生的临时锁文件
+~$*
+
+# ── 3. 运行产物：含答卷代码、评分理由、页面截图 ───────────
+output/
+render_dumps/
+*.jsonl
+*.log
+
+# 备份文件（历史评分数据常以 .bak 形式残留）
+*.bak
+*.backup
+*.orig
+*.old
+*_autosave.*
+
+# ── 4. 本地工具状态（可能含路径、会话内容）───────────────
+.claude/settings.local.json
+.remember/
+.cache/
+
+# ── 5. Python ─────────────────────────────────────────────
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── 6. IDE 与操作系统 ─────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+.DS_Store
