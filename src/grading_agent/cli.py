@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug-fetch", action="store_true", help="每次抓取都写 render_dumps")
     parser.add_argument("--skip-identification", action="store_true",
                         help="跳过阶段B题目识别，从已有 grading_detail.jsonl 恢复题目ID→三元组映射")
+    parser.add_argument("--force-rerun", action="store_true",
+                        help="忽略已完成行，全部重新评分（默认会断点续跑跳过已评分的行）")
     parser.add_argument("--verify", action="store_true", help="一致性验证模式(不写回xlsx)")
     return parser
 
@@ -93,6 +95,7 @@ def main() -> int:
         debug_fetch=args.debug_fetch,
         skip_identification=args.skip_identification,
         verify=args.verify,
+        force_rerun=args.force_rerun,
     )
 
     try:

@@ -87,6 +87,17 @@ class ReviewView(ttk.Frame):
         ent.pack(side="left")
         ent.bind("<KeyRelease>", lambda _e: self._apply_filter())
 
+        # 置信度阈值可现场调整：LLM 自评置信度分布极度偏高（实测 585 行中
+        # 0.8 有 117 行、0.9 有 228 行、1.0 有 204 行），按默认 0.7 只有 1 行算低置信度，
+        # 高亮几乎看不见。放个输入框便于试不同阈值找到真正该复核的行。
+        ttk.Label(bar, text="低置信阈值:").pack(side="left", padx=(12, 2))
+        self.threshold_var = tk.StringVar(
+            value=str(self.app.config_obj.grading.confidence_threshold))
+        tent = ttk.Entry(bar, textvariable=self.threshold_var, width=5)
+        tent.pack(side="left")
+        tent.bind("<Return>", lambda _e: self._apply_filter())
+        tent.bind("<FocusOut>", lambda _e: self._apply_filter())
+
         self.summary_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.summary_var, foreground="#444").pack(side="right")
 
@@ -120,11 +131,16 @@ class ReviewView(ttk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=vsb.set)
 
-        # 行着色：黄=待复核，红=失败，橙=偏差大，蓝=已人工改分
-        self.tree.tag_configure("pending", background="#FFF8DC")
-        self.tree.tag_configure("failed", background="#FFE4E1")
-        self.tree.tag_configure("bigdiff", background="#FFEBCD")
-        self.tree.tag_configure("overridden", background="#E6F3FF")
+        # 行着色。Treeview 一行只能显示一种底色，故按严重度取最高的一种：
+        #   失败 > 低置信度 > 大偏差 > 已改分 > 正常
+        # 底色不宜过浅——#FFF8DC 这类在白底上几乎看不出来，故用饱和度稍高的颜色，
+        # 并配前景色进一步区分。
+        self.tree.tag_configure("failed", background="#FFD5D5", foreground="#8B0000")
+        self.tree.tag_configure("pending", background="#FFE9A8", foreground="#7A5200")
+        self.tree.tag_configure("bigdiff", background="#FFD9B3", foreground="#8A4B00")
+        self.tree.tag_configure("overridden", background="#D6EAFF", foreground="#0B4F8B")
+        # 低置信度且偏差也大：底色用低置信度的黄，但前景改红以示叠加
+        self.tree.tag_configure("pending_bigdiff", background="#FFE9A8", foreground="#A32100")
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -282,7 +298,7 @@ class ReviewView(ttk.Frame):
     # ── 筛选与表格 ──
 
     def _matches(self, r: RowView) -> bool:
-        threshold = self.app.config_obj.grading.confidence_threshold
+        threshold = self._threshold()
         f = self.filter_var.get()
         if f == FILTER_PENDING and r.status(threshold) != "待复核":
             return False
@@ -304,32 +320,56 @@ class ReviewView(ttk.Frame):
             return False
         return True
 
+    def _threshold(self) -> float:
+        """当前低置信度阈值：优先用工具条输入框，非法输入退回配置值。"""
+        try:
+            v = float(self.threshold_var.get())
+        except (ValueError, AttributeError):
+            return self.app.config_obj.grading.confidence_threshold
+        if not (0.0 <= v <= 1.0):
+            return self.app.config_obj.grading.confidence_threshold
+        return v
+
     def _apply_filter(self) -> None:
-        threshold = self.app.config_obj.grading.confidence_threshold
+        threshold = self._threshold()
         self.visible = [r for r in self.rows if self._matches(r)]
 
         self.tree.delete(*self.tree.get_children())
         for r in self.visible:
             eff = r.effective_score
             d = r.diff
-            tags = []
             st = r.status(threshold)
-            if not r.parse_ok:
-                tags.append("failed")
-            elif st == "待复核":
-                tags.append("pending")
-            elif d is not None and abs(d) >= 3:
-                tags.append("bigdiff")
-            if r.is_overridden:
-                tags.append("overridden")
+            big_diff = d is not None and abs(d) >= 3
+            low_conf = st == "待复核"
 
-            self.tree.insert("", "end", iid=str(r.row_num), tags=tuple(tags), values=(
+            # Treeview 一行只能一种底色，按严重度取最高的一种。
+            # 低置信度与大偏差同时成立时用专门的组合 tag，避免偏差信息被吞掉。
+            if not r.parse_ok:
+                tag = "failed"
+            elif low_conf and big_diff:
+                tag = "pending_bigdiff"
+            elif low_conf:
+                tag = "pending"
+            elif big_diff:
+                tag = "bigdiff"
+            elif r.is_overridden:
+                tag = "overridden"
+            else:
+                tag = ""
+
+            # 状态列直接标出置信度，低置信度行一眼可辨（不必只靠底色）
+            status_text = ("✎" if r.is_overridden else "") + st
+            if low_conf and r.confidence is not None:
+                status_text = f"{status_text} {r.confidence:.2f}"
+
+            self.tree.insert("", "end", iid=str(r.row_num),
+                             tags=((tag,) if tag else ()), values=(
                 r.row_num,
                 r.answer_id[-6:] if r.answer_id else "—",
                 "—" if eff is None else eff,
                 "—" if r.human_score is None else r.human_score,
                 "—" if d is None else f"{d:+d}",
-                ("✎" if r.is_overridden else "") + st,
+                status_text,
             ))
 
         pending = sum(1 for r in self.rows if r.status(threshold) == "待复核")
@@ -348,7 +388,7 @@ class ReviewView(ttk.Frame):
             "ai": lambda r: (r.effective_score is None, r.effective_score or 0),
             "human": lambda r: (r.human_score is None, r.human_score or 0),
             "diff": lambda r: (r.diff is None, -abs(r.diff or 0)),
-            "status": lambda r: r.status(self.app.config_obj.grading.confidence_threshold),
+            "status": lambda r: r.status(self._threshold()),
         }
         key = keymap.get(col)
         if key is None:

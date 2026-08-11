@@ -69,6 +69,7 @@ class MonitorRunner:
         debug_fetch: bool = False,
         skip_identification: bool = False,
         verify: bool = False,
+        force_rerun: bool = False,
         output_root: Path | None = None,
     ) -> None:
         self.task_dir = task_dir
@@ -77,6 +78,7 @@ class MonitorRunner:
         self.debug_fetch = debug_fetch
         self.skip_identification = skip_identification
         self.verify = verify
+        self.force_rerun = force_rerun
         self.output_root = output_root
 
         self._msg_q: "queue.Queue[tuple[str, Any]]" = queue.Queue()
@@ -160,6 +162,7 @@ class MonitorRunner:
                 debug_fetch=self.debug_fetch,
                 skip_identification=self.skip_identification,
                 verify=self.verify,
+                force_rerun=self.force_rerun,
                 input_fn=self._input_fn,
                 print_fn=self._print_fn,
                 event_fn=self._event_fn,

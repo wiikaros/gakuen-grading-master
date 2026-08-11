@@ -104,6 +104,7 @@ class Orchestrator:
         debug_fetch: bool = False,
         skip_identification: bool = False,
         verify: bool = False,
+        force_rerun: bool = False,
         input_fn: Callable = input,
         print_fn: Callable = print,
         event_fn: Callable[[dict], None] | None = None,
@@ -116,6 +117,7 @@ class Orchestrator:
         self.debug_fetch = debug_fetch
         self.skip_identification = skip_identification
         self.verify = verify
+        self.force_rerun = force_rerun
         self.input_fn = input_fn
         self.print_fn = print_fn
         self.event_fn = event_fn
@@ -128,7 +130,26 @@ class Orchestrator:
         root = output_root if output_root is not None else Path("output")
         self.output_dir = root / task_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.detail_log_path = self.output_dir / config.output.detail_log
+
+        # 明细日志路径：验证模式写独立文件，与生产结果隔离。
+        # 原因：验证模式不做断点续跑（见阶段C），每轮都把全部行重评一遍并追加。
+        # 若与生产 jsonl 共用，多轮调 prompt 回归会把生产文件撑到几十 MB，
+        # 且两类结果混在一起——生产 jsonl 应当只反映正式跑批的评分。
+        prod_detail = self.output_dir / config.output.detail_log
+        if verify:
+            # grading_detail.jsonl → grading_detail.verify.jsonl
+            self.detail_log_path = prod_detail.with_suffix(".verify" + prod_detail.suffix)
+            # 每轮验证从零开始，避免上一轮结果混入本轮报告
+            try:
+                if self.detail_log_path.exists():
+                    self.detail_log_path.unlink()
+            except Exception:
+                pass
+        else:
+            self.detail_log_path = prod_detail
+        # 生产 jsonl 路径始终可用：验证模式下 --skip-identification 要从它恢复题目映射
+        self.prod_detail_log_path = prod_detail
+
         self.review_queue_path = self.output_dir / config.output.review_queue
         self.render_dumps_dir = self.output_dir / config.output.render_dumps_subdir
         # 启动时清空 render_dumps（清空重来）：避免跨次跑批的历史转储残留
@@ -231,7 +252,10 @@ class Orchestrator:
         self.stdlib = stdlib
         self._log(f"  构建标准库: {len(stdlib.all_triples())} 道参考题, {len(gradable)} 条可评标准")
 
-        # 冒烟测试：每个题目ID 抽 1 个 URL 预抓取
+        # 冒烟测试：每个题目ID 抽 1 个 URL 预抓取，验证连通性与页面结构。
+        # 注意它先于阶段 B 执行，所以即便勾了「跳过题目识别」也会抓这几个 URL——
+        # 这是有意的（早失败早报错，避免批量阶段才发现大面积抓取失败），
+        # 但它只抓不评分、不调用 LLM、不弹窗。
         if not self._smoke_test(rows, task_ids):
             return self._fail_report()
 
@@ -241,8 +265,11 @@ class Orchestrator:
         triple_map: dict[str, TaskTriple] = {}
 
         if self.skip_identification:
-            # 从已有 JSONL 恢复
-            triple_str_map = read_triple_map_from_detail(self.detail_log_path)
+            # 从已有 JSONL 恢复。始终读**生产** jsonl：验证模式的 detail 文件
+            # 每轮开跑前会被清空，从它恢复必然为空。题目映射与模式无关，
+            # 复用生产跑批的识别结果即可。
+            restore_src = self.prod_detail_log_path
+            triple_str_map = read_triple_map_from_detail(restore_src)
             for tid, tstr in triple_str_map.items():
                 t = _parse_triple_str(tstr)
                 if t:
@@ -250,6 +277,17 @@ class Orchestrator:
             self._log(f"  --skip-identification: 从 JSONL 恢复 {len(triple_map)} 个映射")
             for tid, t in triple_map.items():
                 self._log(f"    {tid} → {t}")
+
+            # 恢复不全时明确告警：否则会静默退回逐个识别（既花钱又弹窗），
+            # 用户以为勾选没生效，实际是恢复源缺失。
+            missing = [t for t in task_ids if t not in triple_map]
+            if missing:
+                if not triple_map:
+                    self._log(f"  ⚠ 未能从 {restore_src} 恢复任何映射")
+                    self._log(f"    该文件不存在或为空——本任务此前没跑过，无历史可复用。")
+                else:
+                    self._log(f"  ⚠ 有 {len(missing)} 个题目ID 无历史映射: {missing}")
+                self._log(f"    这些题目ID 仍需识别（会调用 LLM 并弹确认框）。")
 
         # 启动浏览器和 LLM
         dumps_dir = self.render_dumps_dir if self.debug_fetch else (
@@ -299,10 +337,15 @@ class Orchestrator:
             grader = Grader(fetcher, backend, stdlib)
             state = _RunState()
 
-            # 断点续跑：跳过 JSONL 中已完成的行
-            completed_rows = read_completed_rows(self.detail_log_path) if not self.verify else set()
+            # 断点续跑：跳过 JSONL 中已完成的行。
+            # 两种情况关闭：验证模式（每轮都要全量重评，否则对比的是老结果）；
+            # force_rerun（用户显式要求忽略历史，重评全部目标行）。
+            skip_resume = self.verify or self.force_rerun
+            completed_rows = set() if skip_resume else read_completed_rows(self.prod_detail_log_path)
             if completed_rows:
                 self._log(f"  断点续跑: 跳过 {len(completed_rows)} 个已完成行")
+            elif self.force_rerun and not self.verify:
+                self._log("  强制重跑: 忽略已完成行，全部目标行重新评分（会产生新的 LLM 调用费用）")
 
             target_rows = rows
             if self.max_rows is not None:

@@ -85,6 +85,7 @@ class MonitorView(ttk.Frame):
         self.verify_var = tk.BooleanVar(value=False)
         self.skip_id_var = tk.BooleanVar(value=False)
         self.debug_fetch_var = tk.BooleanVar(value=False)
+        self.force_rerun_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(params, text="验证模式（不写回 xlsx）",
                         variable=self.verify_var).grid(row=1, column=0, columnspan=3,
                                                        sticky="w", pady=(6, 0))
@@ -94,9 +95,12 @@ class MonitorView(ttk.Frame):
         ttk.Checkbutton(params, text="每次抓取写转储",
                         variable=self.debug_fetch_var).grid(row=1, column=5, columnspan=2,
                                                             sticky="w", pady=(6, 0))
+        ttk.Checkbutton(params, text="忽略已完成行（强制重跑）",
+                        variable=self.force_rerun_var).grid(row=2, column=0, columnspan=3,
+                                                            sticky="w", pady=(2, 0))
 
         btns = ttk.Frame(params)
-        btns.grid(row=0, column=7, rowspan=2, padx=(16, 0))
+        btns.grid(row=0, column=7, rowspan=3, padx=(16, 0))
         self.start_btn = ttk.Button(btns, text="▶ 开始", command=self._on_start, state="disabled")
         self.start_btn.grid(row=0, column=0, padx=2)
         self.stop_btn = ttk.Button(btns, text="■ 停止", command=self._on_stop, state="disabled")
@@ -236,6 +240,18 @@ class MonitorView(ttk.Frame):
             self.app.release_busy(BUSY_OWNER)
             return
 
+        # 强制重跑会对已评过的行重复调用 LLM，先让用户确认
+        if self.force_rerun_var.get() and not self.verify_var.get():
+            if not messagebox.askyesno(
+                "确认强制重跑",
+                "已勾选「忽略已完成行」。\n\n"
+                "历史评分记录将被忽略，所有目标行都会重新调用 LLM 评分，"
+                "产生额外费用。旧记录不会被删除，界面与验证报告以最新一次为准。\n\n"
+                "确定继续？",
+            ):
+                self.app.release_busy(BUSY_OWNER)
+                return
+
         self._clear_log()
         self._done_count = 0
         self._total = 0
@@ -250,6 +266,7 @@ class MonitorView(ttk.Frame):
             debug_fetch=self.debug_fetch_var.get(),
             skip_identification=self.skip_id_var.get(),
             verify=self.verify_var.get(),
+            force_rerun=self.force_rerun_var.get(),
             output_root=self.app.output_root,
         )
         self.runner.start()

@@ -85,7 +85,11 @@ def read_triple_map_from_detail(path: Path) -> dict[str, str]:
     """从已有 JSONL 提取 task_id → triple 字符串 的映射。
 
     用于 --skip-identification：跳过阶段 B 时从历史结果恢复识别缓存。
-    取每个 task_id 第一次出现的 triple。
+
+    取每个 task_id **最后一次**出现的 triple——与 build_row_views 和
+    run_consistency_check 的"后写覆盖先写"策略保持一致。若首轮识别选错了候选、
+    后续重跑改对了，取第一条会把错误的映射固化下来，而复核界面显示的却是
+    改对后的结果，两处静默不一致。统一取最后一条消除这个隐患。
     """
     if not path.exists():
         return {}
@@ -99,7 +103,7 @@ def read_triple_map_from_detail(path: Path) -> dict[str, str]:
                 rec = json.loads(line)
                 tid = rec.get("task_id")
                 triple = rec.get("triple")
-                if tid and triple and tid not in triple_map:
+                if tid and triple:
                     triple_map[tid] = triple
             except json.JSONDecodeError:
                 continue
