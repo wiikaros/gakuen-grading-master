@@ -33,12 +33,13 @@ def _is_circuit_prompt(prompt: str) -> bool:
 
 def ask_confirm(parent, prompt: str, *, stdlib=None,
                 body_font=None, code_font=None,
-                description: str = "", task_id: str = "") -> str:
+                description: str = "", task_id: str = "",
+                best_triple: str = "") -> str:
     """弹出确认对话框，阻塞直到用户选择。返回给 Orchestrator 的输入字符串。"""
     if _is_circuit_prompt(prompt):
         return _ask_circuit(parent, prompt, body_font)
     return _ask_identification(parent, prompt, stdlib, body_font, code_font,
-                               description, task_id)
+                               description, task_id, best_triple)
 
 
 def _ask_circuit(parent, prompt: str, body_font) -> str:
@@ -74,7 +75,7 @@ def _ask_circuit(parent, prompt: str, body_font) -> str:
 
 
 def _ask_identification(parent, prompt: str, stdlib, body_font, code_font,
-                        description: str, task_id: str) -> str:
+                        description: str, task_id: str, best_triple: str = "") -> str:
     """题目确认：候选单选 + 参考代码预览。"""
     triples = []
     if stdlib is not None:
@@ -83,6 +84,12 @@ def _ask_identification(parent, prompt: str, stdlib, body_font, code_font,
         except Exception:
             triples = []
     max_choice = _parse_choice_range(prompt) or len(triples)
+    # 默认选中 LLM 推荐的最佳候选（best_triple），而非恒选第 1 个
+    best_idx = 1
+    for i, t in enumerate(triples, start=1):
+        if str(t) == best_triple:
+            best_idx = i
+            break
 
     dlg = tk.Toplevel(parent)
     dlg.title("确认题目识别")
@@ -131,7 +138,7 @@ def _ask_identification(parent, prompt: str, stdlib, body_font, code_font,
     choice_frame = ttk.LabelFrame(root, text=" 候选（选中即预览其参考代码） ", padding=6)
     choice_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-    choice_var = tk.IntVar(value=1)
+    choice_var = tk.IntVar(value=best_idx)
 
     def show_code(idx: int) -> None:
         if stdlib is None or not triples or not (1 <= idx <= len(triples)):
@@ -150,7 +157,7 @@ def _ask_identification(parent, prompt: str, stdlib, body_font, code_font,
                 choice_frame, text=f"{i}. {t}", value=i, variable=choice_var,
                 command=lambda i=i: show_code(i),
             ).grid(row=(i - 1) // cols, column=(i - 1) % cols, sticky="w", padx=6, pady=2)
-        show_code(1)
+        show_code(best_idx)
     else:
         ttk.Label(choice_frame,
                   text=f"标准库不可用，请直接输入 1-{max_choice} 或使用下方按钮",

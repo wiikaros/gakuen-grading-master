@@ -34,6 +34,7 @@ class MonitorView(ttk.Frame):
         self._total: int = 0
         self._draining = False
         self._last_identify_desc: str = ""
+        self._last_identify_triple: str = ""
 
         self._build_ui()
         self.app.add_busy_listener(self._on_busy_change)
@@ -327,8 +328,9 @@ class MonitorView(ttk.Frame):
         if etype == "phase":
             self.phase_var.set(f"阶段{event.get('phase')} {event.get('label','')}")
         elif etype == "identify_ready":
-            # 缓存题目描述，供随后的确认弹窗左栏显示
+            # 缓存题目描述 + 最佳候选，供随后的确认弹窗显示（左栏题目、右栏默认选中的参考代码）
             self._last_identify_desc = str(event.get("description") or "")
+            self._last_identify_triple = str(event.get("best_triple") or "")
         elif etype == "grading_start":
             self._total = int(event.get("total") or 0)
             self.progress.configure(maximum=max(self._total, 1), value=0)
@@ -365,7 +367,8 @@ class MonitorView(ttk.Frame):
         answer = ask_confirm(self, req.prompt, stdlib=stdlib,
                              body_font=self.app.body_font,
                              code_font=self.app.code_font,
-                             description=self._last_identify_desc)
+                             description=self._last_identify_desc,
+                             best_triple=self._last_identify_triple)
         req.reply(answer)
 
     def _on_finish(self, report, err: str | None) -> None:
