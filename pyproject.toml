@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grading-agent"
+version = "0.1.0"
+description = "基于 LLM 的自动化阅卷工具（CLI 批处理）"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

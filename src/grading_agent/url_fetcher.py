@@ -170,9 +170,10 @@ class UrlFetcher:
                 page = self.context.new_page()
                 res = page.goto(url, wait_until="networkidle", timeout=timeout)
 
-                # 尝试获取原始响应文本（调试用）
+                # 原始响应文本仅 --debug-fetch 转储时才需要（传给 _save_render 的 original_html）。
+                # 默认模式下不下载，避免每行白拉几十~几百 KB 的响应体。
                 response_text: Optional[str] = None
-                if res is not None:
+                if res is not None and self.debug_dumps_dir and self.always_dump:
                     try:
                         response_text = res.text()
                     except Exception:

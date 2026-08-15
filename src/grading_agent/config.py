@@ -34,6 +34,7 @@ class GradingConfig:
     write_back: bool = True
     max_score: int = 25
     xlsx_save_interval: int = 50
+    concurrency: int = 8
 
 
 @dataclass
@@ -93,6 +94,11 @@ def _apply_env_overrides(cfg: Config) -> None:
             pass
     if v := os.getenv("GRADING_DEBUG_FETCH"):
         cfg.output.render_dumps_on_failure_only = v.lower() != "true"
+    if v := os.getenv("GRADING_CONCURRENCY"):
+        try:
+            cfg.grading.concurrency = max(1, int(v))
+        except ValueError:
+            pass
 
     # API keys
     cfg.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")

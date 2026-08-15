@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="跳过阶段B题目识别，从已有 grading_detail.jsonl 恢复题目ID→三元组映射")
     parser.add_argument("--force-rerun", action="store_true",
                         help="忽略已完成行，全部重新评分（默认会断点续跑跳过已评分的行）")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="阶段C并发 worker 数（默认从 config 读，config 默认 8；1=串行）")
     parser.add_argument("--verify", action="store_true", help="一致性验证模式(不写回xlsx)")
     return parser
 
@@ -59,6 +61,8 @@ def main() -> int:
         config.llm.model = args.model
     if args.confidence_threshold is not None:
         config.grading.confidence_threshold = args.confidence_threshold
+    if args.concurrency is not None:
+        config.grading.concurrency = max(1, args.concurrency)
 
     # verify 模式下默认不写回
     if args.verify:
@@ -80,6 +84,7 @@ def main() -> int:
     print(f"  任务: {task_dir}")
     print(f"  模型: {config.llm.provider}/{config.llm.model}")
     print(f"  置信度阈值: {config.grading.confidence_threshold}")
+    print(f"  并发数: {config.grading.concurrency}")
     if args.verify:
         print(f"  模式: 一致性验证（不写回 xlsx）")
     if args.max_rows:

@@ -24,9 +24,21 @@ class ProblemIdentifier:
         self.llm = llm
         self.stdlib = stdlib
 
-    def identify(self, task_id: str, url: str) -> tuple[IdentificationResult, FetchResult]:
-        """抓取 URL + LLM 分类，返回 (识别结果, 抓取结果)。"""
-        fetch_result = self.fetcher.fetch(url, row_id=f"identify_{task_id}")
+    def identify(
+        self,
+        task_id: str,
+        url: str,
+        cached_fetch: FetchResult | None = None,
+    ) -> tuple[IdentificationResult, FetchResult]:
+        """抓取 URL + LLM 分类，返回 (识别结果, 抓取结果)。
+
+        cached_fetch：冒烟测试已成功抓取的复用结果（ok=True 才复用），
+        避免同一 URL 在冒烟和识别阶段被抓两次。None 或抓取失败的缓存照常重抓。
+        """
+        if cached_fetch is not None and cached_fetch.ok:
+            fetch_result = cached_fetch
+        else:
+            fetch_result = self.fetcher.fetch(url, row_id=f"identify_{task_id}")
         if not fetch_result.ok:
             return IdentificationResult(
                 best_triple=TaskTriple(level="一级", session="上午", question=1),  # type: ignore[arg-type]

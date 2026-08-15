@@ -11,6 +11,7 @@ PRD §4:
 from __future__ import annotations
 
 import datetime as _dt
+import queue as _queue
 import shutil
 import sys
 import threading
@@ -27,6 +28,7 @@ from grading_agent.logging_utils import (
     write_review_queue,
 )
 from grading_agent.models import (
+    FetchResult,
     GradeResult,
     RunReport,
     TaskRow,
@@ -252,47 +254,7 @@ class Orchestrator:
         self.stdlib = stdlib
         self._log(f"  构建标准库: {len(stdlib.all_triples())} 道参考题, {len(gradable)} 条可评标准")
 
-        # 冒烟测试：每个题目ID 抽 1 个 URL 预抓取，验证连通性与页面结构。
-        # 注意它先于阶段 B 执行，所以即便勾了「跳过题目识别」也会抓这几个 URL——
-        # 这是有意的（早失败早报错，避免批量阶段才发现大面积抓取失败），
-        # 但它只抓不评分、不调用 LLM、不弹窗。
-        if not self._smoke_test(rows, task_ids):
-            return self._fail_report()
-
-        # ── 阶段 B：题目识别 ──
-        self._log("\n[阶段B] 题目识别")
-        self._emit("phase", phase="B", label="题目识别")
-        triple_map: dict[str, TaskTriple] = {}
-
-        if self.skip_identification:
-            # 从已有 JSONL 恢复。始终读**生产** jsonl：验证模式的 detail 文件
-            # 每轮开跑前会被清空，从它恢复必然为空。题目映射与模式无关，
-            # 复用生产跑批的识别结果即可。
-            restore_src = self.prod_detail_log_path
-            triple_str_map = read_triple_map_from_detail(restore_src)
-            for tid, tstr in triple_str_map.items():
-                t = _parse_triple_str(tstr)
-                if t:
-                    triple_map[tid] = t
-            self._log(f"  --skip-identification: 从 JSONL 恢复 {len(triple_map)} 个映射")
-            for tid, t in triple_map.items():
-                self._log(f"    {tid} → {t}")
-
-            # 恢复不全时明确告警：否则会静默退回逐个识别（既花钱又弹窗），
-            # 用户以为勾选没生效，实际是恢复源缺失。
-            missing = [t for t in task_ids if t not in triple_map]
-            if missing:
-                if not triple_map:
-                    self._log(f"  ⚠ 未能从 {restore_src} 恢复任何映射")
-                    self._log(f"    该文件不存在或为空——本任务此前没跑过，无历史可复用。")
-                else:
-                    self._log(f"  ⚠ 有 {len(missing)} 个题目ID 无历史映射: {missing}")
-                self._log(f"    这些题目ID 仍需识别（会调用 LLM 并弹确认框）。")
-
-        # 启动浏览器和 LLM
-        dumps_dir = self.render_dumps_dir if self.debug_fetch else (
-            self.render_dumps_dir if not self.config.output.render_dumps_on_failure_only else None
-        )
+        # 启动浏览器和 LLM（提前到冒烟之前：冒烟/识别共用同一个浏览器实例）
         fetcher = UrlFetcher(
             headless=self.config.playwright.headless,
             timeout_ms=self.config.playwright.timeout_ms,
@@ -303,6 +265,45 @@ class Orchestrator:
         backend = LangChainBackend(llm, self.config)
 
         with fetcher:
+            # 冒烟测试：每个题目ID 抽 1 个 URL 预抓取，验证连通性与页面结构。
+            # 注意它先于阶段 B 执行，所以即便勾了「跳过题目识别」也会抓这几个 URL——
+            # 这是有意的（早失败早报错，避免批量阶段才发现大面积抓取失败），
+            # 但它只抓不评分、不调用 LLM、不弹窗。
+            # 抓取结果缓存下来供阶段 B 识别复用，避免同一 URL 抓两次。
+            smoke_cache = self._smoke_test(fetcher, rows, task_ids)
+            if smoke_cache is None:
+                return self._fail_report()
+
+            # ── 阶段 B：题目识别 ──
+            self._log("\n[阶段B] 题目识别")
+            self._emit("phase", phase="B", label="题目识别")
+            triple_map: dict[str, TaskTriple] = {}
+
+            if self.skip_identification:
+                # 从已有 JSONL 恢复。始终读**生产** jsonl：验证模式的 detail 文件
+                # 每轮开跑前会被清空，从它恢复必然为空。题目映射与模式无关，
+                # 复用生产跑批的识别结果即可。
+                restore_src = self.prod_detail_log_path
+                triple_str_map = read_triple_map_from_detail(restore_src)
+                for tid, tstr in triple_str_map.items():
+                    t = _parse_triple_str(tstr)
+                    if t:
+                        triple_map[tid] = t
+                self._log(f"  --skip-identification: 从 JSONL 恢复 {len(triple_map)} 个映射")
+                for tid, t in triple_map.items():
+                    self._log(f"    {tid} → {t}")
+
+                # 恢复不全时明确告警：否则会静默退回逐个识别（既花钱又弹窗），
+                # 用户以为勾选没生效，实际是恢复源缺失。
+                missing = [t for t in task_ids if t not in triple_map]
+                if missing:
+                    if not triple_map:
+                        self._log(f"  ⚠ 未能从 {restore_src} 恢复任何映射")
+                        self._log(f"    该文件不存在或为空——本任务此前没跑过，无历史可复用。")
+                    else:
+                        self._log(f"  ⚠ 有 {len(missing)} 个题目ID 无历史映射: {missing}")
+                    self._log(f"    这些题目ID 仍需识别（会调用 LLM 并弹确认框）。")
+
             # 阶段 B：未覆盖的题目ID 做识别
             identifier = ProblemIdentifier(fetcher, backend, stdlib)
             for tid in task_ids:
@@ -313,8 +314,11 @@ class Orchestrator:
                 if not first_row:
                     continue
                 self._log(f"\n  处理题目ID={tid}")
-                # 先识别（不交互），把题目描述发给 GUI 供确认弹窗显示，再走确认
-                id_result, fetch_result = identifier.identify(tid, first_row.url)
+                # 先识别（不交互），把题目描述发给 GUI 供确认弹窗显示，再走确认。
+                # 冒烟已抓过该题目ID 的首行 URL 则直接复用，不再重抓。
+                id_result, fetch_result = identifier.identify(
+                    tid, first_row.url, cached_fetch=smoke_cache.get(tid),
+                )
                 self._emit("identify_ready", task_id=tid,
                            description=fetch_result.description or "",
                            code=fetch_result.code or "",
@@ -331,190 +335,349 @@ class Orchestrator:
                     triple_map[tid] = confirmed
                     self._log(f"  ✓ 已缓存: 题目ID {tid} → {confirmed}")
 
-            # ── 阶段 C：批量评分 ──
-            self._log("\n[阶段C] 批量评分")
-            self._emit("phase", phase="C", label="批量评分")
-            grader = Grader(fetcher, backend, stdlib)
-            state = _RunState()
+        # with 块结束：主 fetcher 关闭。阶段 C 的并发 worker 会各自自建浏览器。
 
-            # 断点续跑：跳过 JSONL 中已完成的行。
-            # 两种情况关闭：验证模式（每轮都要全量重评，否则对比的是老结果）；
-            # force_rerun（用户显式要求忽略历史，重评全部目标行）。
-            skip_resume = self.verify or self.force_rerun
-            completed_rows = set() if skip_resume else read_completed_rows(self.prod_detail_log_path)
-            if completed_rows:
-                self._log(f"  断点续跑: 跳过 {len(completed_rows)} 个已完成行")
-            elif self.force_rerun and not self.verify:
-                self._log("  强制重跑: 忽略已完成行，全部目标行重新评分（会产生新的 LLM 调用费用）")
+        # ── 阶段 C：批量评分 ──
+        self._log("\n[阶段C] 批量评分")
+        self._emit("phase", phase="C", label="批量评分")
+        state = _RunState()
 
-            target_rows = rows
-            if self.max_rows is not None:
-                target_rows = rows[:self.max_rows]
-                self._log(f"  --max-rows: 仅处理前 {self.max_rows} 行")
+        # 断点续跑：跳过 JSONL 中已完成的行。
+        # 两种情况关闭：验证模式（每轮都要全量重评，否则对比的是老结果）；
+        # force_rerun（用户显式要求忽略历史，重评全部目标行）。
+        skip_resume = self.verify or self.force_rerun
+        completed_rows = set() if skip_resume else read_completed_rows(self.prod_detail_log_path)
+        if completed_rows:
+            self._log(f"  断点续跑: 跳过 {len(completed_rows)} 个已完成行")
+        elif self.force_rerun and not self.verify:
+            self._log("  强制重跑: 忽略已完成行，全部目标行重新评分（会产生新的 LLM 调用费用）")
 
-            total = len(target_rows)
-            self._emit("grading_start", total=total, skipped=len(completed_rows))
-            for idx, row in enumerate(target_rows, start=1):
-                # GUI 停止请求：JSONL 已逐行 flush，重跑可断点续跑
-                if self._stop_requested():
-                    self._log("\n  ⚠ 已请求停止，中断批量评分（已完成行已写入 JSONL）")
-                    self._emit("stopped", at_index=idx, total=total)
-                    break
+        target_rows = rows
+        if self.max_rows is not None:
+            target_rows = rows[:self.max_rows]
+            self._log(f"  --max-rows: 仅处理前 {self.max_rows} 行")
+        target_total = len(target_rows)
 
-                # 断点续跑跳过
-                if row.row_num in completed_rows:
-                    continue
+        # 分拣：已完成跳过；未识别题目ID直接进待复核；其余进待评分队列
+        pending: list[TaskRow] = []
+        for row in target_rows:
+            if row.row_num in completed_rows:
+                continue
+            if triple_map.get(row.task_id) is None:
+                state.review_rows.append({
+                    "row_num": row.row_num, "answer_id": row.answer_id,
+                    "task_id": row.task_id, "url": row.url,
+                    "confidence": 0, "ai_total_score": "",
+                    "reason": "identification_rejected", "reasoning": "题目ID未识别",
+                })
+                state.low_confidence_queued += 1
+                continue
+            pending.append(row)
 
-                # 该题目ID 未识别 → 跳过
-                triple = triple_map.get(row.task_id)
-                if triple is None:
-                    state.review_rows.append({
-                        "row_num": row.row_num, "answer_id": row.answer_id,
-                        "task_id": row.task_id, "url": row.url,
-                        "confidence": 0, "ai_total_score": "",
-                        "reason": "identification_rejected", "reasoning": "题目ID未识别",
-                    })
-                    state.low_confidence_queued += 1
-                    continue
+        total = len(pending)
+        self._emit("grading_start", total=total, skipped=len(completed_rows))
+        if total == 0:
+            self._log("  无待评分行")
+        else:
+            self._run_phase_c_concurrent(pending, triple_map, stdlib, wb, layout, ai_xlsx, state)
 
-                # 进度显示
-                self._log(f"  [{idx}/{total}] 行{row.row_num} 题目ID={row.task_id} ... ", )
-                self._emit("row_start", index=idx, total=total,
-                           row_num=row.row_num, task_id=row.task_id,
-                           answer_id=row.answer_id, triple=str(triple))
-                result, fetch_result = grader.fetch_and_grade(row.url, triple, row_id=str(row.row_num))
+        # ── 阶段 D：收尾 ──
+        self._log("\n[阶段D] 收尾")
+        self._emit("phase", phase="D", label="收尾")
+        output_xlsx_path = ai_xlsx if ai_xlsx is not None else xlsx_path
+        if not self.verify and ai_xlsx is not None:
+            try:
+                output_xlsx_path = save_workbook(wb, ai_xlsx)
+                self._log(f"  AI 评分 xlsx 已保存: {output_xlsx_path}")
+            except Exception as e:
+                self._log(f"  ❌ 保存 xlsx 失败: {e}")
 
-                if not fetch_result.ok:
-                    state.fetch_failed += 1
-                    state.fetch_failed_streak += 1
-                    state.llm_failed_streak = 0
-                    state.review_rows.append({
-                        "row_num": row.row_num, "answer_id": row.answer_id,
-                        "task_id": row.task_id, "url": row.url,
-                        "confidence": 0, "ai_total_score": "",
-                        "reason": "fetch_failed", "reasoning": fetch_result.error or "",
-                    })
-                    state.low_confidence_queued += 1
-                    self._log(f"抓取✗ → 留空")
-                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
-                               task_id=row.task_id, answer_id=row.answer_id,
-                               outcome="fetch_failed", written=False,
-                               total_score=None, confidence=0.0,
-                               error=fetch_result.error or "",
-                               stats=self._stats(state))
-                elif not result.parse_ok:
-                    state.fetch_failed_streak = 0
-                    state.llm_failed_streak += 1
-                    state.review_rows.append({
-                        "row_num": row.row_num, "answer_id": row.answer_id,
-                        "task_id": row.task_id, "url": row.url,
-                        "confidence": result.confidence, "ai_total_score": result.total_score,
-                        "reason": "llm_parse_failed", "reasoning": result.reasoning,
-                    })
-                    state.low_confidence_queued += 1
-                    self._log(f"LLM✗ → 留空")
-                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
-                               task_id=row.task_id, answer_id=row.answer_id,
-                               outcome="llm_parse_failed", written=False,
-                               total_score=None, confidence=result.confidence,
-                               error=result.reasoning,
-                               stats=self._stats(state))
-                else:
-                    state.fetched_ok += 1
-                    state.fetch_failed_streak = 0
-                    state.llm_failed_streak = 0
-                    high = Grader.is_high_confidence(result, self.config.grading.confidence_threshold)
-                    # 取该题总分上限用于进度显示
+        # 排序后导出待复核清单（并发下完成顺序不定，按行号排序保持整洁）
+        state.review_rows.sort(key=lambda r: r["row_num"])
+        write_review_queue(self.review_queue_path, state.review_rows)
+        self._log(f"  待复核: {state.low_confidence_queued} 行 → {self.review_queue_path}")
+        self._log(f"  评分明细: {self.detail_log_path}")
+
+        report = RunReport(
+            total_rows=target_total,
+            fetched_ok=state.fetched_ok,
+            fetch_failed=state.fetch_failed,
+            high_confidence_written=state.high_confidence_written,
+            low_confidence_queued=state.low_confidence_queued,
+            detail_log_path=self.detail_log_path,
+            review_queue_path=self.review_queue_path,
+            output_xlsx_path=output_xlsx_path,
+        )
+        self._log(f"\n  已写回评分: {report.high_confidence_written} 行 (高置信度)")
+        self._log(f"  待复核: {report.low_confidence_queued} 行")
+        self._log(f"  抓取失败: {report.fetch_failed} 行")
+        self._emit("finished",
+                   total_rows=report.total_rows,
+                   fetched_ok=report.fetched_ok,
+                   fetch_failed=report.fetch_failed,
+                   high_confidence_written=report.high_confidence_written,
+                   low_confidence_queued=report.low_confidence_queued,
+                   detail_log_path=str(report.detail_log_path),
+                   review_queue_path=str(report.review_queue_path),
+                   output_xlsx_path=str(report.output_xlsx_path),
+                   stopped=self._stop_requested())
+        return report
+
+    def _record_grade_result(
+        self,
+        row: TaskRow,
+        result: GradeResult,
+        fetch_result: FetchResult,
+        state: _RunState,
+        stdlib: StandardLibrary,
+        wb,
+        layout,
+        done: int,
+        total: int,
+    ) -> None:
+        """记录一行的评分结果：更新统计 + 写 JSONL + 写 xlsx 内存 + 发事件。
+
+        只在主线程调用（并发版由结果收集循环调用），因此 state/wb 无需加锁。
+        """
+        if not fetch_result.ok:
+            state.fetch_failed += 1
+            state.fetch_failed_streak += 1
+            state.llm_failed_streak = 0
+            state.review_rows.append({
+                "row_num": row.row_num, "answer_id": row.answer_id,
+                "task_id": row.task_id, "url": row.url,
+                "confidence": 0, "ai_total_score": "",
+                "reason": "fetch_failed", "reasoning": fetch_result.error or "",
+            })
+            state.low_confidence_queued += 1
+            self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} 抓取✗ → 留空")
+            self._emit("row_done", index=done, total=total, row_num=row.row_num,
+                       task_id=row.task_id, answer_id=row.answer_id,
+                       outcome="fetch_failed", written=False,
+                       total_score=None, confidence=0.0,
+                       error=fetch_result.error or "",
+                       stats=self._stats(state))
+        elif not result.parse_ok:
+            state.fetch_failed_streak = 0
+            state.llm_failed_streak += 1
+            state.review_rows.append({
+                "row_num": row.row_num, "answer_id": row.answer_id,
+                "task_id": row.task_id, "url": row.url,
+                "confidence": result.confidence, "ai_total_score": result.total_score,
+                "reason": "llm_parse_failed", "reasoning": result.reasoning,
+            })
+            state.low_confidence_queued += 1
+            self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} LLM✗ → 留空")
+            self._emit("row_done", index=done, total=total, row_num=row.row_num,
+                       task_id=row.task_id, answer_id=row.answer_id,
+                       outcome="llm_parse_failed", written=False,
+                       total_score=None, confidence=result.confidence,
+                       error=result.reasoning,
+                       stats=self._stats(state))
+        else:
+            state.fetched_ok += 1
+            state.fetch_failed_streak = 0
+            state.llm_failed_streak = 0
+            high = Grader.is_high_confidence(result, self.config.grading.confidence_threshold)
+            # 取该题总分上限用于进度显示
+            try:
+                bundle_total_max = stdlib.get(result.triple).standard.total_max
+            except KeyError:
+                bundle_total_max = "?"
+            # 写 JSONL（无论是否写回 xlsx，都记明细；含题目描述与学生代码供复核离线查看）
+            write_grade_detail(
+                self.detail_log_path, row, result, _timestamp(),
+                description=fetch_result.description or "",
+                student_code=fetch_result.code or "",
+            )
+            if high and not self.verify:
+                update_cell_in_memory(wb.active, row.row_num, layout.score_col_idx, result.total_score)
+                state.high_confidence_written += 1
+                self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} "
+                          f"评分: {result.total_score}/{bundle_total_max} (conf {result.confidence:.2f}) → 写回")
+                _outcome, _written = "written", True
+            elif high and self.verify:
+                state.high_confidence_written += 1
+                self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} "
+                          f"评分: {result.total_score} (conf {result.confidence:.2f}) → [verify] 不写回")
+                _outcome, _written = "verify_ok", False
+            else:
+                state.low_confidence_queued += 1
+                state.review_rows.append({
+                    "row_num": row.row_num, "answer_id": row.answer_id,
+                    "task_id": row.task_id, "url": row.url,
+                    "confidence": result.confidence, "ai_total_score": result.total_score,
+                    "reason": "low_confidence", "reasoning": result.reasoning,
+                })
+                self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} "
+                          f"评分: {result.total_score} (conf {result.confidence:.2f}) → ⚠ 留空")
+                _outcome, _written = "low_confidence", False
+
+            self._emit("row_done", index=done, total=total, row_num=row.row_num,
+                       task_id=row.task_id, answer_id=row.answer_id,
+                       outcome=_outcome, written=_written,
+                       total_score=result.total_score,
+                       confidence=result.confidence,
+                       error="", stats=self._stats(state))
+
+    def _run_phase_c_concurrent(
+        self,
+        pending: list[TaskRow],
+        triple_map: dict[str, TaskTriple],
+        stdlib: StandardLibrary,
+        wb,
+        layout,
+        ai_xlsx: Path | None,
+        state: _RunState,
+    ) -> None:
+        """阶段 C 并发执行：N 个 worker 线程并行评分，主线程收集结果并统一落盘。
+
+        线程模型：
+        - worker 线程：各自在本线程创建独立 UrlFetcher + LLM backend
+          （Playwright 同步 API 绑死创建线程，严禁跨线程共享 fetcher）；
+          只做"抓取+评分"，不碰任何共享状态。
+        - 主线程（本方法调用方）：从 result_q 收结果，更新 state、写 JSONL、
+          写 xlsx 内存、发事件、做熔断。因此 state/wb/JSONL 全程无需锁。
+        """
+        n_workers = max(1, min(self.config.grading.concurrency, len(pending)))
+        total = len(pending)
+
+        work_q: "_queue.Queue[TaskRow | None]" = _queue.Queue()
+        for row in pending:
+            work_q.put(row)
+        for _ in range(n_workers):
+            work_q.put(None)  # 每个 worker 一个哨兵，取到即退出
+
+        result_q: "_queue.Queue[tuple[TaskRow, GradeResult, FetchResult]]" = _queue.Queue()
+        stop_workers = threading.Event()
+
+        def worker_loop(worker_id: int) -> None:
+            fetcher = UrlFetcher(
+                headless=self.config.playwright.headless,
+                timeout_ms=self.config.playwright.timeout_ms,
+                debug_dumps_dir=self.render_dumps_dir,
+                always_dump=self.debug_fetch,
+            )
+            try:
+                fetcher._init_browser()  # 必须在本线程内启动浏览器
+                llm = make_llm(self.config.llm.provider, self.config.llm.model,
+                               self.config, self.config.llm.temperature)
+                backend = LangChainBackend(llm, self.config)
+                grader = Grader(fetcher, backend, stdlib)
+                while True:
+                    if stop_workers.is_set() or self._stop_requested():
+                        return
+                    row = work_q.get()
+                    if row is None:
+                        return
+                    triple = triple_map[row.task_id]
                     try:
-                        bundle_total_max = stdlib.get(triple).standard.total_max
-                    except KeyError:
-                        bundle_total_max = "?"
-                    # 写 JSONL（无论是否写回 xlsx，都记明细）
-                    # 一并存下题目描述与学生代码，复核界面即可离线查看，无需重抓
-                    write_grade_detail(
-                        self.detail_log_path, row, result, _timestamp(),
-                        description=fetch_result.description or "",
-                        student_code=fetch_result.code or "",
-                    )
-                    if high and not self.verify:
-                        # 高置信度：写回内存中的 xlsx
-                        update_cell_in_memory(wb.active, row.row_num, layout.score_col_idx, result.total_score)
-                        state.high_confidence_written += 1
-                        self._log(f"评分: {result.total_score}/{bundle_total_max} (conf {result.confidence:.2f}) → 写回")
-                        _outcome, _written = "written", True
-                    elif high and self.verify:
-                        state.high_confidence_written += 1
-                        self._log(f"评分: {result.total_score} (conf {result.confidence:.2f}) → [verify] 不写回")
-                        _outcome, _written = "verify_ok", False
-                    else:
-                        state.low_confidence_queued += 1
+                        result, fetch_result = grader.fetch_and_grade(
+                            row.url, triple, row_id=str(row.row_num))
+                    except Exception as exc:
+                        # worker 级异常（如浏览器崩溃）：构造失败结果上交，不丢行。
+                        # 该行计入 fetch_failed 并进待复核，与其他抓取失败同等处理。
+                        from grading_agent.models import SyntaxPenalty
+                        result = GradeResult(
+                            triple=triple, dimension_scores=[],
+                            syntax_penalty=SyntaxPenalty(error_categories=[], category_count=0, total_deduction=0),
+                            subtotal=0, total_score=0,
+                            reasoning=f"worker 异常: {type(exc).__name__}: {exc}",
+                            confidence=0.0, parse_ok=False,
+                        )
+                        fetch_result = FetchResult(
+                            description="", code="", raw_html=None, ok=False,
+                            error=f"worker 异常: {type(exc).__name__}: {exc}",
+                            row_id=str(row.row_num),
+                        )
+                    result_q.put((row, result, fetch_result))
+            except Exception as exc:
+                # 浏览器启动失败等致命异常：打日志并让 worker 退出；
+                # 队列里剩余行由其他 worker 消化（或由主线程兜底标记失败）。
+                self._log(f"  ⚠ worker-{worker_id} 启动失败: {type(exc).__name__}: {exc}")
+            finally:
+                fetcher.close()
+
+        workers = [
+            threading.Thread(target=worker_loop, args=(i,), daemon=True, name=f"grader-{i}")
+            for i in range(n_workers)
+        ]
+        for t in workers:
+            t.start()
+        self._log(f"  并发模式: {n_workers} 个 worker（每 worker 独立浏览器+LLM 客户端）")
+
+        # 主线程：收集结果
+        done = 0
+        aborted = False
+        while done < total:
+            if self._stop_requested():
+                self._log("\n  ⚠ 已请求停止，等待在途任务完成后收尾")
+                self._emit("stopped", at_index=done, total=total)
+                stop_workers.set()
+                break
+            try:
+                row, result, fetch_result = result_q.get(timeout=1.0)
+            except _queue.Empty:
+                if not any(t.is_alive() for t in workers):
+                    # 所有 worker 已死但还有任务没结果——浏览器全军覆没（如 chromium 未安装）。
+                    # 把剩余任务全部标记失败，避免主线程永久阻塞。
+                    self._log("  ❌ 所有 worker 异常退出，剩余行标记为失败")
+                    while True:
+                        try:
+                            row = work_q.get_nowait()
+                        except _queue.Empty:
+                            break
+                        if row is None:
+                            continue
+                        done += 1
+                        state.fetch_failed += 1
+                        state.fetch_failed_streak += 1
                         state.review_rows.append({
                             "row_num": row.row_num, "answer_id": row.answer_id,
                             "task_id": row.task_id, "url": row.url,
-                            "confidence": result.confidence, "ai_total_score": result.total_score,
-                            "reason": "low_confidence", "reasoning": result.reasoning,
+                            "confidence": 0, "ai_total_score": "",
+                            "reason": "fetch_failed",
+                            "reasoning": "worker 浏览器启动失败",
                         })
-                        self._log(f"评分: {result.total_score} (conf {result.confidence:.2f}) → ⚠ 留空")
-                        _outcome, _written = "low_confidence", False
-
-                    self._emit("row_done", index=idx, total=total, row_num=row.row_num,
-                               task_id=row.task_id, answer_id=row.answer_id,
-                               outcome=_outcome, written=_written,
-                               total_score=result.total_score,
-                               confidence=result.confidence,
-                               error="", stats=self._stats(state))
-
-                # 定期 save xlsx（非 verify 模式）——写 AI 副本，不碰原始表
-                if not self.verify and ai_xlsx is not None and idx % self.config.grading.xlsx_save_interval == 0:
-                    try:
-                        save_workbook(wb, ai_xlsx)
-                    except Exception as e:
-                        self._log(f"  ⚠ 定期 save 失败: {e}")
-
-                # 熔断检查
-                if self._check_circuit_breaker(state):
-                    self._log("  ⚠ 熔断触发，停止后续处理")
+                        state.low_confidence_queued += 1
+                        self._emit("row_done", index=done, total=total, row_num=row.row_num,
+                                   task_id=row.task_id, answer_id=row.answer_id,
+                                   outcome="fetch_failed", written=False,
+                                   total_score=None, confidence=0.0,
+                                   error="worker 浏览器启动失败",
+                                   stats=self._stats(state))
                     break
+                continue
 
-            # ── 阶段 D：收尾 ──
-            self._log("\n[阶段D] 收尾")
-            self._emit("phase", phase="D", label="收尾")
-            output_xlsx_path = ai_xlsx if ai_xlsx is not None else xlsx_path
-            if not self.verify and ai_xlsx is not None:
+            done += 1
+            self._record_grade_result(row, result, fetch_result, state, stdlib, wb, layout, done, total)
+
+            # 定期 save xlsx（按已完成数计，与串行版"每 N 行"语义一致）
+            if not self.verify and ai_xlsx is not None and done % self.config.grading.xlsx_save_interval == 0:
                 try:
-                    output_xlsx_path = save_workbook(wb, ai_xlsx)
-                    self._log(f"  AI 评分 xlsx 已保存: {output_xlsx_path}")
+                    save_workbook(wb, ai_xlsx)
                 except Exception as e:
-                    self._log(f"  ❌ 保存 xlsx 失败: {e}")
+                    self._log(f"  ⚠ 定期 save 失败: {e}")
 
-            write_review_queue(self.review_queue_path, state.review_rows)
-            self._log(f"  待复核: {state.low_confidence_queued} 行 → {self.review_queue_path}")
-            self._log(f"  评分明细: {self.detail_log_path}")
+            # 熔断检查（state 由主线程独占更新，无需锁）
+            if self._check_circuit_breaker(state):
+                self._log("  ⚠ 熔断触发，停止后续处理")
+                stop_workers.set()
+                aborted = True
+                break
 
-            report = RunReport(
-                total_rows=total,
-                fetched_ok=state.fetched_ok,
-                fetch_failed=state.fetch_failed,
-                high_confidence_written=state.high_confidence_written,
-                low_confidence_queued=state.low_confidence_queued,
-                detail_log_path=self.detail_log_path,
-                review_queue_path=self.review_queue_path,
-                output_xlsx_path=output_xlsx_path,
-            )
-            self._log(f"\n  已写回评分: {report.high_confidence_written} 行 (高置信度)")
-            self._log(f"  待复核: {report.low_confidence_queued} 行")
-            self._log(f"  抓取失败: {report.fetch_failed} 行")
-            self._emit("finished",
-                       total_rows=report.total_rows,
-                       fetched_ok=report.fetched_ok,
-                       fetch_failed=report.fetch_failed,
-                       high_confidence_written=report.high_confidence_written,
-                       low_confidence_queued=report.low_confidence_queued,
-                       detail_log_path=str(report.detail_log_path),
-                       review_queue_path=str(report.review_queue_path),
-                       output_xlsx_path=str(report.output_xlsx_path),
-                       stopped=self._stop_requested())
-            return report
+        # 收尾：等在途任务跑完并收集它们的结果——已完成的 LLM 调用已付费，不能丢弃
+        for t in workers:
+            t.join()
+        while not result_q.empty():
+            row, result, fetch_result = result_q.get_nowait()
+            done += 1
+            self._record_grade_result(row, result, fetch_result, state, stdlib, wb, layout, done, total)
+
+        if aborted or self._stop_requested():
+            remaining = total - done
+            if remaining > 0:
+                self._log(f"  未处理 {remaining} 行（已中断；重跑时断点续跑会跳过已完成行）")
 
     def _stats(self, state: "_RunState") -> dict:
         """当前累计统计快照，随每个 row_done 事件带给 GUI。"""
@@ -525,10 +688,17 @@ class Orchestrator:
             "low_confidence_queued": state.low_confidence_queued,
         }
 
-    def _smoke_test(self, rows: list[TaskRow], task_ids: list[str]) -> bool:
+    def _smoke_test(
+        self,
+        fetcher: UrlFetcher,
+        rows: list[TaskRow],
+        task_ids: list[str],
+    ) -> "dict[str, FetchResult] | None":
         """阶段 A 冒烟测试：每个题目ID 抽 1 个 URL 预抓取，验证连通性。
 
-        失败则中止。PRD §4 阶段 A 步骤 3。
+        与主流程共用传入的 fetcher（不再自建浏览器，省一次 Chromium 启动）。
+        成功时返回 {task_id: FetchResult} 缓存，供阶段 B 识别复用（避免同一 URL 抓两次）；
+        任一失败返回 None（调用方中止）。无可测试 URL 时返回空 dict（视为通过）。
         """
         self._log("\n[冒烟测试] 预抓取验证连通性")
         sample_urls: list[tuple[str, str]] = []  # (task_id, url)
@@ -538,24 +708,19 @@ class Orchestrator:
                 sample_urls.append((tid, first.url))
         if not sample_urls:
             self._log("  无可测试 URL，跳过")
-            return True
+            return {}
 
-        dumps = self.render_dumps_dir if not self.config.output.render_dumps_on_failure_only else None
-        with UrlFetcher(
-            headless=self.config.playwright.headless,
-            timeout_ms=self.config.playwright.timeout_ms,
-            debug_dumps_dir=self.render_dumps_dir,
-            always_dump=False,
-        ) as fetcher:
-            for tid, url in sample_urls:
-                result = fetcher.fetch(url, row_id=f"smoke_{tid}")
-                if result.ok:
-                    self._log(f"  ✓ 题目ID={tid} URL 可访问，抓取成功")
-                else:
-                    self._log(f"  ✗ 题目ID={tid} URL 抓取失败: {result.error}")
-                    self._log(f"    冒烟测试失败，请检查网络/URL有效性/页面结构后重试")
-                    return False
-        return True
+        cache: dict[str, FetchResult] = {}
+        for tid, url in sample_urls:
+            result = fetcher.fetch(url, row_id=f"smoke_{tid}")
+            if result.ok:
+                self._log(f"  ✓ 题目ID={tid} URL 可访问，抓取成功")
+                cache[tid] = result
+            else:
+                self._log(f"  ✗ 题目ID={tid} URL 抓取失败: {result.error}")
+                self._log(f"    冒烟测试失败，请检查网络/URL有效性/页面结构后重试")
+                return None
+        return cache
 
     def _check_circuit_breaker(self, state: _RunState) -> bool:
         """熔断检查：连续 N 次同类失败触发。返回 True 表示应中止。"""
