@@ -168,16 +168,15 @@ python -m grading_agent.cli "tasks/task_name" \
 #### 一致性验证（不写回 xlsx，对比人工评分）
 
 ```bash
-# 注意，当前一致性检验会调用 LLM 重新评分，产生额外费用
+# 注意，此一致性检验会调用 LLM 重新评分，产生额外费用
 python -m grading_agent.cli "tasks/task_name" --verify
 # 或便捷入口：
 python scripts/run_verify.py tasks/task_name
 # prompt 调优后回归（跳过已识别的题目ID，只重评）：
 python scripts/run_verify.py tasks/task_name --skip-identification
 
-# 如果已有 grading_detail.jsonl，可直接用它做验证（不再抓取/识别/评分）：
-# 先编辑 scripts\compute_accuracy_from_normal_run.py 中的相关路径，然后运行
-python scripts/compute_accuracy_from_normal_run.py
+# 如果已有 grading_detail.jsonl，可直接用它算一致率（不再抓取/识别/评分、不产生 LLM 费用）：
+python scripts/compute_accuracy_from_normal_run.py tasks/task_name
 ```
 
 #### 调试：只跑前 N 行
@@ -247,7 +246,7 @@ python -m grading_agent.cli "tasks_name" --concurrency 1
 | `grading_detail.jsonl` | 每行评分明细（维度分项 + 扣分 + 置信度 + 理由 + 题目描述 + 学生代码），断点续跑的数据源 |
 | `human_override.jsonl` | 人工改分流水（可追溯、可撤销） |
 | `review_queue.csv` | 待复核清单（低置信度行 + 抓取失败行） |
-| `verification_report.txt` | 一致性验证报告（仅 `--verify` 模式生成） |
+| `verification_report.txt` | 一致性验证报告（`--verify` 模式或 `compute_accuracy_from_normal_run.py` 生成） |
 | `run.log` | 跑批日志（GUI 跑批时落盘，追加模式） |
 | `render_dumps/` | 抓取调试转储（默认仅失败时写） |
 
@@ -426,7 +425,7 @@ A：检查 `.env` 里是否填了对应 provider 的 API key（如 `DEEPSEEK_API
 │   ├── fetch_one.py             # 单 URL 抓取调试
 │   ├── parse_docx_debug.py      # docx 解析调试
 │   ├── run_verify.py            # 一致性验证便捷入口
-│   └── compute_accuracy_from_normal_run.py  # 基于普通模式产物直接算一致率（路径需自行修改）
+│   └── compute_accuracy_from_normal_run.py  # 基于普通模式跑批产物直接算一致率（不重跑评分）
 ├── tests/                       # pytest 测试套件
 ├── tasks/                       # 任务文件夹（gitignore），用户放置
 └── output/                      # 运行产物（gitignore），按任务名分目录
