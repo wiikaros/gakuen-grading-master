@@ -15,9 +15,7 @@ IDENTIFICATION_PROMPT = """你是阅卷平台的题目识别助手。下面是�
 3. 忽略变量名、注释、代码风格,只看算法意图与题意。
 
 输出 json:
-- level: "L1"=一级 / "L2"=二级
-- session: "morning"=上午场 / "afternoon"=下午场
-- question: 题号 1 或 2
+- candidate_index: 整数，上方候选清单中匹配项的编号(1起，即"候选N"的 N)
 - confidence: 0.0-1.0(≥0.9 题意明确匹配;0.7-0.9 算法匹配但有歧义;<0.7 不确定)
 - reasoning: 1-2 句判断依据;confidence<0.9 时须说明歧义点
 

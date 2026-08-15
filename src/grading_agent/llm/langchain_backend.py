@@ -20,8 +20,6 @@ from grading_agent.models import (
     IdentificationResult,
     StandardBundle,
     TaskTriple,
-    LEVEL_MAP,
-    SESSION_MAP,
     get_llm_output_models,
     identification_output_to_result,
     grade_output_to_result,
@@ -93,6 +91,7 @@ class LangChainBackend:
         description: str,
         code: str,
         candidates_summary: str,
+        candidates: list[TaskTriple],
     ) -> IdentificationResult:
         """题目识别：LLM 1-of-N 分类。
 
@@ -105,18 +104,16 @@ class LangChainBackend:
         try:
             structured = self.llm.with_structured_output(IdentificationOutput, method="json_mode")
             out = self._call_with_retry(lambda: structured.invoke(prompt))
-            return identification_output_to_result(out)
+            return identification_output_to_result(out, candidates)
         except Exception:
             # 降级：纯文本 + JSON 解析
-            return self._classify_fallback(prompt)
+            return self._classify_fallback(prompt, candidates)
 
-    def _classify_fallback(self, prompt: str) -> IdentificationResult:
+    def _classify_fallback(self, prompt: str, candidates: list[TaskTriple]) -> IdentificationResult:
         """JSON 降级方案：prompt 追加"输出严格JSON"，用 JsonOutputParser。"""
         from langchain_core.output_parsers import JsonOutputParser
         fallback_prompt = prompt + "\n\n请输出严格 JSON（不要 markdown 代码块），格式：\n" + json.dumps({
-            "level": "L1 或 L2",
-            "session": "morning 或 afternoon",
-            "question": 1,
+            "candidate_index": 1,
             "confidence": 0.0,
             "reasoning": "",
         }, ensure_ascii=False)
@@ -125,10 +122,11 @@ class LangChainBackend:
             out_dict = self._call_with_retry(lambda: parser.parse(self.llm.invoke(fallback_prompt).content))
             IdentificationOutput, _, _ = get_llm_output_models()
             out = IdentificationOutput(**out_dict)
-            return identification_output_to_result(out)
+            return identification_output_to_result(out, candidates)
         except Exception as exc:
+            fallback_triple = candidates[0] if candidates else TaskTriple(level="未定", session="上午", question=1)
             return IdentificationResult(
-                best_triple=TaskTriple(level="一级", session="上午", question=1),  # type: ignore[arg-type]
+                best_triple=fallback_triple,
                 confidence=0.0,
                 candidates=[],
                 reasoning=f"LLM 解析失败: {exc}",

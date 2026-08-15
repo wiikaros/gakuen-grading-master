@@ -8,8 +8,6 @@ from grading_agent.models import (
     FetchResult,
     IdentificationResult,
     TaskTriple,
-    LEVEL_MAP_REV,
-    SESSION_MAP_REV,
 )
 from grading_agent.standard_library import StandardLibrary
 from grading_agent.llm.base import LLMBackend
@@ -40,19 +38,24 @@ class ProblemIdentifier:
         else:
             fetch_result = self.fetcher.fetch(url, row_id=f"identify_{task_id}")
         if not fetch_result.ok:
+            triples = self.stdlib.all_triples()
+            fallback = triples[0] if triples else TaskTriple(level="未定", session="上午", question=1)
             return IdentificationResult(
-                best_triple=TaskTriple(level="一级", session="上午", question=1),  # type: ignore[arg-type]
+                best_triple=fallback,
                 confidence=0.0,
                 candidates=[],
                 reasoning=f"抓取失败: {fetch_result.error}",
                 parse_ok=False,
             ), fetch_result
 
+        # 候选编号与 candidate_summary_for_llm 同序（都来自 all_triples 的稳定排序）
+        triples = self.stdlib.all_triples()
         candidates_summary = self.stdlib.candidate_summary_for_llm()
         result = self.llm.classify_problem(
             description=fetch_result.description,
             code=fetch_result.code,
             candidates_summary=candidates_summary,
+            candidates=triples,
         )
         return result, fetch_result
 
@@ -69,7 +72,7 @@ class ProblemIdentifier:
         用户输入：
         - 'y' → 确认推荐（best_triple）
         - 'n' → 拒绝，返回 None（该题目ID 标记未识别）
-        - 数字 1-8 → 选其他候选（按候选列表序号）
+        - 数字 1-N → 选其他候选（按候选列表序号，N=候选总数）
 
         返回确认的三元组，或 None（用户拒绝）。
         input_fn/print_fn 可注入，便于测试。

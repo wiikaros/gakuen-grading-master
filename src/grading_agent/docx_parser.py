@@ -141,7 +141,7 @@ def _extract_dimensions_and_special_notes(paragraphs: list[dict]) -> tuple[list[
 
 def _build_entries_by_session(
     question_blocks: dict[tuple[str | None, int], list[dict]],
-    default_session: str = "上午",
+    level: str,
 ) -> list[StandardEntry]:
     """把按 (session, question) 分组的段落块构建成 StandardEntry 列表。
 
@@ -149,9 +149,6 @@ def _build_entries_by_session(
     复制成上下午两条（同内容）。
     """
     entries: list[StandardEntry] = []
-    # 收集出现过的 session
-    sessions_seen = {sess for (sess, _) in question_blocks.keys() if sess is not None}
-    has_session_split = len(sessions_seen) > 0
 
     for (session, question), paras in question_blocks.items():
         dimensions, special_notes, syntax_rule = _extract_dimensions_and_special_notes(paras)
@@ -162,7 +159,7 @@ def _build_entries_by_session(
             # 未分场次：复制成上下午两条
             for sess in ("上午", "下午"):
                 entries.append(StandardEntry(
-                    triple=TaskTriple(level="一级", session=sess, question=question),  # type: ignore[arg-type]
+                    triple=TaskTriple(level=level, session=sess, question=question),
                     total_max=sum(d.max_score for d in dimensions),
                     dimensions=dimensions,
                     special_notes=special_notes,
@@ -170,7 +167,7 @@ def _build_entries_by_session(
                 ))
         else:
             entries.append(StandardEntry(
-                triple=TaskTriple(level="一级", session=session, question=question),  # type: ignore[arg-type]
+                triple=TaskTriple(level=level, session=session, question=question),
                 total_max=sum(d.max_score for d in dimensions),
                 dimensions=dimensions,
                 special_notes=special_notes,
@@ -185,7 +182,7 @@ def parse_standards(path: Path, level: str) -> list[StandardEntry]:
 
     Args:
         path: docx 路径
-        level: "一级" 或 "二级"（由调用方根据文件名判定传入）
+        level: 任意级别，如 "一级"/"三级"（由调用方按文件名判定传入）
     """
     content = read_docx(path)
     paragraphs = content.paragraphs
@@ -222,35 +219,4 @@ def parse_standards(path: Path, level: str) -> list[StandardEntry]:
             key = (current_session, current_question)
             blocks.setdefault(key, []).append(p)
 
-    # 构建成 entries（覆盖 level）
-    entries = _build_entries_by_session(blocks)  # type: ignore[arg-type]
-
-    # 修正 level（_build_entries_by_session 内部硬编码了"一级"，这里按传入 level 覆盖）
-    fixed = []
-    for e in entries:
-        fixed.append(StandardEntry(
-            triple=TaskTriple(level=level, session=e.triple.session, question=e.triple.question),  # type: ignore[arg-type]
-            total_max=e.total_max,
-            dimensions=e.dimensions,
-            special_notes=e.special_notes,
-            syntax_penalty_rule=e.syntax_penalty_rule,
-        ))
-    return fixed
-
-
-def parse_level1_standards(path: Path) -> list[StandardEntry]:
-    """一级评分标准：不分场次（7.12/12.15 均不分）。
-
-    得 2 条（题1/题2），复制成 4 个三元组（上下午同内容）。
-    级别由文件名判定，不靠内容标题。
-    """
-    return parse_standards(path, level="一级")
-
-
-def parse_level2_standards(path: Path) -> list[StandardEntry]:
-    """二级评分标准：自适应场次。
-
-    - 若段落出现"上午场"/"下午场"标题 → 按场次分段，每场2题，建4条
-    - 否则 → 2条标准复制成4条（上下午同内容）
-    """
-    return parse_standards(path, level="二级")
+    return _build_entries_by_session(blocks, level=level)

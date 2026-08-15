@@ -11,8 +11,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from grading_agent.models import StandardBundle, StandardEntry, TaskTriple
-from grading_agent.docx_parser import parse_level1_standards, parse_level2_standards
+from grading_agent.models import (
+    StandardBundle,
+    StandardEntry,
+    TaskTriple,
+    extract_level,
+    level_sort_key,
+)
+from grading_agent.docx_parser import parse_standards
 from grading_agent.reference_codes import parse_reference_codes
 
 
@@ -20,21 +26,57 @@ class StandardLibraryError(Exception):
     """标准库构建错误（缺参考代码等致命情况）。"""
 
 
+def find_task_docxs(task_dir: Path) -> tuple[dict[str, Path], Path]:
+    """扫描任务文件夹：返回 ({级别: 评分标准docx}, 参考代码docx)。
+
+    - 含"参考代码"的 docx → 参考代码文件（唯一，多个则报错）
+    - 文件名含「X级」（中文或阿拉伯数字）→ 该级别评分标准
+    - 同一级别匹配到多个文件 → 报错（配置歧义，不得静默任选一个）
+    - 一个级别都没找到 / 缺参考代码 → FileNotFoundError
+    """
+    standards: dict[str, Path] = {}
+    ref: Path | None = None
+    for p in sorted(task_dir.glob("*.docx")):
+        if p.name.startswith("~$"):
+            continue
+        if "参考代码" in p.name:
+            if ref is not None:
+                raise FileNotFoundError(f"任务文件夹含多个参考代码 docx: {ref.name}, {p.name}")
+            ref = p
+            continue
+        level = extract_level(p.name)
+        if level:
+            if level in standards:
+                raise FileNotFoundError(
+                    f"级别 {level} 匹配到多个评分标准 docx: {standards[level].name}, {p.name}")
+            standards[level] = p
+    if ref is None:
+        raise FileNotFoundError(f"任务文件夹 {task_dir} 未找到含 '参考代码' 的 docx")
+    if not standards:
+        raise FileNotFoundError(f"任务文件夹 {task_dir} 未找到任何 'X级' 评分标准 docx")
+    return standards, ref
+
+
 class StandardLibrary:
     """进程内标准库：三元组索引 standards + reference_codes。"""
 
-    def __init__(self, level1_docx: Path, level2_docx: Path, ref_codes_docx: Path) -> None:
+    def __init__(self, standards_docx: dict[str, Path], ref_codes_docx: Path) -> None:
         self.standards: dict[TaskTriple, StandardEntry] = {}
         self.reference_codes: dict[TaskTriple, str] = {}
         self._triples_without_standard: set[TaskTriple] = set()  # 有参考代码但无评分标准
-        self._build(level1_docx, level2_docx, ref_codes_docx)
+        self._build(standards_docx, ref_codes_docx)
 
-    def _build(self, level1_docx: Path, level2_docx: Path, ref_codes_docx: Path) -> None:
-        # 解析评分标准
-        level1 = parse_level1_standards(level1_docx)
-        level2 = parse_level2_standards(level2_docx)
-        for e in level1 + level2:
-            self.standards[e.triple] = e
+    @classmethod
+    def from_task_dir(cls, task_dir: Path) -> "StandardLibrary":
+        """从任务文件夹自动发现并构建标准库（orchestrator/GUI 统一入口）。"""
+        standards, ref = find_task_docxs(task_dir)
+        return cls(standards, ref)
+
+    def _build(self, standards_docx: dict[str, Path], ref_codes_docx: Path) -> None:
+        # 解析评分标准（每个级别一个 docx，级别作为 level 传入）
+        for level, path in standards_docx.items():
+            for e in parse_standards(path, level=level):
+                self.standards[e.triple] = e
 
         # 解析参考代码
         self.reference_codes = parse_reference_codes(ref_codes_docx)
@@ -79,12 +121,11 @@ class StandardLibrary:
 
     def all_triples(self) -> list[TaskTriple]:
         """返回全部可识别+评分的三元组（即 reference_codes 的 key，按稳定顺序排序）。"""
-        # 排序：级别（一级<二级）、场次（上午<下午）、题号
-        level_order = {"一级": 0, "二级": 1}
+        # 排序：级别（一级<二级<三级...）、场次（上午<下午）、题号
         session_order = {"上午": 0, "下午": 1}
         return sorted(
             self.reference_codes.keys(),
-            key=lambda t: (level_order.get(t.level, 9),
+            key=lambda t: (level_sort_key(t.level),
                           session_order.get(t.session, 9),
                           t.question),
         )

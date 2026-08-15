@@ -155,16 +155,14 @@ class MonitorView(ttk.Frame):
 
     def _precheck(self) -> None:
         """阶段 A 前两步：读 xlsx + 建标准库。不花钱不抓网页。"""
-        from grading_agent.standard_library import StandardLibrary, StandardLibraryError
+        from grading_agent.standard_library import StandardLibrary, StandardLibraryError, find_task_docxs
         from grading_agent.xlsx_io import read_rows
-        from grading_agent.agent.orchestrator import _find_docx, _find_xlsx
+        from grading_agent.agent.orchestrator import _find_xlsx
 
         assert self.task_dir is not None
         try:
             xlsx_path = _find_xlsx(self.task_dir)
-            l1 = _find_docx(self.task_dir, "一级")
-            l2 = _find_docx(self.task_dir, "二级")
-            ref = _find_docx(self.task_dir, "参考代码")
+            standards_map, ref = find_task_docxs(self.task_dir)
         except FileNotFoundError as e:
             self._precheck_fail(str(e))
             return
@@ -176,7 +174,7 @@ class MonitorView(ttk.Frame):
             return
 
         try:
-            stdlib = StandardLibrary(l1, l2, ref)
+            stdlib = StandardLibrary(standards_map, ref)
         except StandardLibraryError as e:
             self._precheck_fail(f"标准库构建失败：{e}")
             return

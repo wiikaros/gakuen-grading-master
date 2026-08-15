@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -15,9 +16,68 @@ from typing import Literal
 
 # ── 枚举类型 ──
 
-Level = Literal["一级", "二级"]
-Session = Literal["上午", "下午"]
-QuestionNo = Literal[1, 2]
+# Level 通用化为任意「X级」中文字符串（一级/二级/三级/四级...），不再用 Literal 限定。
+Level = str
+Session = Literal["上午", "下午"]   # 场次保持两种（上午/下午）
+QuestionNo = int                    # 题数按参考代码 docx 实际表格数动态递增
+
+
+# ── 级别工具函数（供 standard_library / reference_codes / orchestrator 共用）──
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_LEVEL_RE = re.compile(r"([零一二两三四五六七八九十]+|\d+)\s*级")
+
+
+def cn_numeral_to_int(s: str) -> int | None:
+    """'三'→3, '十'→10, '十一'→11, '二十'→20, '3'→3。无法解析返回 None。"""
+    s = s.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if "十" in s:
+        left, _, right = s.partition("十")
+        if (left and left not in _CN_DIGITS) or (right and right not in _CN_DIGITS):
+            return None
+        tens = _CN_DIGITS.get(left, 1) if left else 1
+        ones = _CN_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    if len(s) == 1 and s in _CN_DIGITS:
+        return _CN_DIGITS[s]
+    return None
+
+
+def int_to_level(n: int) -> str:
+    """3 → '三级'。≥100 时退化为 '100级'（现实不会发生，仅兜底）。"""
+    digits = "零一二三四五六七八九"
+    if n < 10:
+        cn = digits[n]
+    elif n == 10:
+        cn = "十"
+    elif n < 20:
+        cn = "十" + digits[n - 10]
+    elif n < 100:
+        cn = digits[n // 10] + "十" + (digits[n % 10] if n % 10 else "")
+    else:
+        cn = str(n)
+    return f"{cn}级"
+
+
+def extract_level(text: str) -> str | None:
+    """从任意文本提取级别并归一化为中文形式：'3级'→'三级'，'三级：'→'三级'。"""
+    m = _LEVEL_RE.search(text)
+    if not m:
+        return None
+    n = cn_numeral_to_int(m.group(1))
+    return int_to_level(n) if n is not None else None
+
+
+def level_sort_key(level: str) -> tuple[int, str]:
+    """排序键：一级<二级<三级...；无法解析的排最后按字符串序。"""
+    m = _LEVEL_RE.search(level)
+    n = cn_numeral_to_int(m.group(1)) if m else None
+    return (n if n is not None else 999, level)
 
 
 # ── 标准库相关 ──
@@ -153,10 +213,9 @@ def _import_pydantic_models():
     from typing import List
 
     class IdentificationOutput(BaseModel):
-        """识别结果 schema。英文标签避免中文枚举在 function calling 中不稳定。"""
-        level: Literal["L1", "L2"]
-        session: Literal["morning", "afternoon"]
-        question: int               # 1 or 2
+        """识别结果 schema。输出候选编号（1-based，对应 prompt 中"候选N"），
+        整数比中文枚举在 function calling/json_mode 下稳定得多，且天然支持任意级别。"""
+        candidate_index: int        # 1-based，对应候选清单中的"候选N"
         confidence: float
         reasoning: str
 
@@ -196,23 +255,24 @@ class DocxContent:
 
 # ── 枚举转换辅助 ──
 
-LEVEL_MAP = {"L1": "一级", "L2": "二级"}
-SESSION_MAP = {"morning": "上午", "afternoon": "下午"}
-LEVEL_MAP_REV = {v: k for k, v in LEVEL_MAP.items()}
-SESSION_MAP_REV = {v: k for k, v in SESSION_MAP.items()}
 
-
-def identification_output_to_result(out) -> IdentificationResult:
+def identification_output_to_result(out, candidates: list[TaskTriple]) -> IdentificationResult:
     """IdentificationOutput(Pydantic) → IdentificationResult(dataclass)。
 
-    candidates 字段在 LLM 输出层不含（function calling 难以稳定输出排序候选列表），
-    这里只构造 best_triple；如需候选排名，由调用方在 prompt 要求中额外解析。
+    candidate_index 越界（含 LLM 幻觉出的非法编号）时返回 parse_ok=False，
+    由调用方走"识别失败人工选择"流程，不得静默落到错误题目。
     """
-    triple = TaskTriple(
-        level=LEVEL_MAP[out.level],
-        session=SESSION_MAP[out.session],
-        question=out.question,  # type: ignore[arg-type]
-    )
+    idx = out.candidate_index
+    if not (1 <= idx <= len(candidates)):
+        fallback = candidates[0] if candidates else TaskTriple(level="未定", session="上午", question=1)
+        return IdentificationResult(
+            best_triple=fallback,
+            confidence=0.0,
+            candidates=[],
+            reasoning=f"LLM 输出候选编号越界: {idx}（有效范围 1-{len(candidates)}）",
+            parse_ok=False,
+        )
+    triple = candidates[idx - 1]
     return IdentificationResult(
         best_triple=triple,
         confidence=out.confidence,

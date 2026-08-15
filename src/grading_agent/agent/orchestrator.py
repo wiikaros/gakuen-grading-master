@@ -33,10 +33,9 @@ from grading_agent.models import (
     RunReport,
     TaskRow,
     TaskTriple,
-    LEVEL_MAP,
-    SESSION_MAP,
+    level_sort_key,
 )
-from grading_agent.standard_library import StandardLibrary, StandardLibraryError
+from grading_agent.standard_library import StandardLibrary, StandardLibraryError, find_task_docxs
 from grading_agent.xlsx_io import (
     read_rows,
     save_workbook,
@@ -57,14 +56,6 @@ def _find_xlsx(task_dir: Path) -> Path:
     if not candidates:
         raise FileNotFoundError(f"任务文件夹 {task_dir} 未找到 xlsx 文件")
     return candidates[0]
-
-
-def _find_docx(task_dir: Path, keyword: str) -> Path:
-    """在任务文件夹找含关键词的 docx。"""
-    for p in task_dir.glob("*.docx"):
-        if keyword in p.name:
-            return p
-    raise FileNotFoundError(f"任务文件夹 {task_dir} 未找到含 '{keyword}' 的 docx")
 
 
 def _parse_triple_str(s: str) -> TaskTriple | None:
@@ -200,16 +191,14 @@ class Orchestrator:
         self._emit("phase", phase="A", label="启动准备")
         try:
             xlsx_path = _find_xlsx(self.task_dir)
-            level1_path = _find_docx(self.task_dir, "一级")
-            level2_path = _find_docx(self.task_dir, "二级")
-            ref_path = _find_docx(self.task_dir, "参考代码")
+            standards_map, ref_path = find_task_docxs(self.task_dir)
         except FileNotFoundError as e:
             self._log(f"❌ {e}")
             return self._fail_report()
 
         self._log(f"  xlsx: {xlsx_path.name}")
-        self._log(f"  一级标准: {level1_path.name}")
-        self._log(f"  二级标准: {level2_path.name}")
+        for level in sorted(standards_map.keys(), key=level_sort_key):
+            self._log(f"  {level}标准: {standards_map[level].name}")
         self._log(f"  参考代码: {ref_path.name}")
 
         # 读 xlsx。注意：读原始表拿行数据，但**写入目标是 output 下的 AI 评分副本**，
@@ -246,7 +235,7 @@ class Orchestrator:
 
         # 构建标准库
         try:
-            stdlib = StandardLibrary(level1_path, level2_path, ref_path)
+            stdlib = StandardLibrary(standards_map, ref_path)
         except StandardLibraryError as e:
             self._log(f"❌ 标准库构建失败: {e}")
             return self._fail_report()

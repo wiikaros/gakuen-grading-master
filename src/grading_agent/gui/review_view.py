@@ -640,15 +640,10 @@ class ReviewView(ttk.Frame):
         """懒建标准库（重评要用）。"""
         if self._stdlib is not None:
             return self._stdlib
-        from grading_agent.agent.orchestrator import _find_docx
         from grading_agent.standard_library import StandardLibrary
 
         assert self.task_dir is not None
-        self._stdlib = StandardLibrary(
-            _find_docx(self.task_dir, "一级"),
-            _find_docx(self.task_dir, "二级"),
-            _find_docx(self.task_dir, "参考代码"),
-        )
+        self._stdlib = StandardLibrary.from_task_dir(self.task_dir)
         return self._stdlib
 
     def _on_regrade(self) -> None:

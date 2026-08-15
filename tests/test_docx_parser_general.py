@@ -1,0 +1,69 @@
+"""三级评分标准解析测试（用 python-docx 合成 docx）。"""
+from docx import Document
+
+from grading_agent.docx_parser import parse_standards
+
+
+def _make_standards_docx(path, with_session: bool = True):
+    doc = Document()
+    if with_session:
+        doc.add_paragraph("上午场")
+        doc.add_paragraph("第一题")
+        doc.add_paragraph("有定义变量(5分)")
+        doc.add_paragraph("有输入语句(5分)")
+        doc.add_paragraph("第二题")
+        doc.add_paragraph("有循环语句(5分)")
+        doc.add_paragraph("循环条件正确(5分)")
+        doc.add_paragraph("下午场")
+        doc.add_paragraph("第一题")
+        doc.add_paragraph("有输出语句(5分)")
+        doc.add_paragraph("输出内容正确(5分)")
+        doc.add_paragraph("第二题")
+        doc.add_paragraph("有条件语句(5分)")
+        doc.add_paragraph("条件表达式正确(5分)")
+    else:
+        doc.add_paragraph("第一题")
+        doc.add_paragraph("有定义变量(5分)")
+        doc.add_paragraph("第二题")
+        doc.add_paragraph("有输出语句(5分)")
+    doc.save(str(path))
+
+
+def test_parse_three_level_with_session(tmp_path):
+    p = tmp_path / "三级评分标准.docx"
+    _make_standards_docx(p, with_session=True)
+    entries = parse_standards(p, level="三级")
+    # 上午 2 题 + 下午 2 题 = 4 条
+    assert len(entries) == 4
+    assert all(e.triple.level == "三级" for e in entries)
+    triples = {str(e.triple) for e in entries}
+    assert triples == {"三级/上午/题1", "三级/上午/题2", "三级/下午/题1", "三级/下午/题2"}
+
+
+def test_parse_three_level_no_session(tmp_path):
+    p = tmp_path / "三级评分标准.docx"
+    _make_standards_docx(p, with_session=False)
+    entries = parse_standards(p, level="三级")
+    # 未分场次：2 题复制成上下午 = 4 条
+    assert len(entries) == 4
+    triples = {str(e.triple) for e in entries}
+    assert triples == {"三级/上午/题1", "三级/下午/题1", "三级/上午/题2", "三级/下午/题2"}
+
+
+def test_parse_three_level_ten_point_dimension(tmp_path):
+    """满分 10 分的维度也应正确解析。"""
+    p = tmp_path / "三级评分标准.docx"
+    doc = Document()
+    doc.add_paragraph("第一题")
+    doc.add_paragraph("综合实现(10分)")
+    doc.add_paragraph("有输入语句(5分)")
+    doc.add_paragraph("第二题")
+    doc.add_paragraph("有输出语句(5分)")
+    doc.save(str(p))
+    entries = parse_standards(p, level="三级")
+    # 未分场次：2 题复制成上下午 = 4 条
+    assert len(entries) == 4
+    # 题1 的 total_max = 10 + 5 = 15
+    q1 = next(e for e in entries if e.triple.question == 1)
+    assert q1.total_max == 15
+    assert any(d.max_score == 10 for d in q1.dimensions)
