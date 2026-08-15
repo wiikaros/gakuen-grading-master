@@ -8,11 +8,11 @@ llm:
   temperature: 0.0
   max_retries: 3
 grading:
-  confidence_threshold: 0.7
+  confidence_threshold: 0.8
   write_back: true
   max_score: 25
   xlsx_save_interval: 50            # 每 N 行 save 一次 xlsx（断点续跑间隔）
-  concurrency: 8                    # 阶段C并发 worker 数；1=串行（等价旧行为）；建议 4-8
+  concurrency: 4                    # 阶段C并发 worker 数；1=串行（等价旧行为）；建议 4-8
 circuit_breaker:
   max_consecutive_fetch_failures: 10  # 连续抓取失败超过此数触发熔断
   max_consecutive_llm_failures: 5     # 连续 LLM 调用失败超过此数触发熔断

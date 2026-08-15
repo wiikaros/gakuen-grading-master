@@ -117,8 +117,8 @@ class ReviewView(ttk.Frame):
         cols = ("row", "answer", "ai", "human", "diff", "status")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
         headings = {
-            "row": ("行", 46), "answer": ("答卷ID", 92), "ai": ("AI", 42),
-            "human": ("人工", 46), "diff": ("Δ", 42), "status": ("状态", 62),
+            "row": ("行", 46), "answer": ("答卷ID", 72), "ai": ("AI", 42),
+            "human": ("人工", 46), "diff": ("Δ", 42), "status": ("状态", 105),
         }
         for c in cols:
             text, width = headings[c]
@@ -129,7 +129,9 @@ class ReviewView(ttk.Frame):
 
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         vsb.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=vsb.set)
+        hsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
         # 行着色。Treeview 一行只能显示一种底色，故按严重度取最高的一种：
         #   失败 > 低置信度 > 大偏差 > 已改分 > 正常

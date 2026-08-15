@@ -64,43 +64,54 @@ class MonitorView(ttk.Frame):
         # ── 参数 ──
         params = ttk.LabelFrame(self, text=" 参数 ", padding=8)
         params.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        params.columnconfigure(0, weight=1)
 
         cfg = self.app.config_obj
-        ttk.Label(params, text="模型:").grid(row=0, column=0, sticky="w")
+
+        # 第一行：全部输入框（模型 / 置信度阈值 / 并发数 / 只跑前N行）
+        row0 = ttk.Frame(params)
+        row0.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(row0, text="模型:").pack(side="left", padx=(0, 4))
         self.provider_var = tk.StringVar(value=cfg.llm.provider)
-        ttk.Combobox(params, textvariable=self.provider_var, width=10,
+        ttk.Combobox(row0, textvariable=self.provider_var, width=10,
                      values=["deepseek", "openai", "claude"],
-                     state="readonly").grid(row=0, column=1, padx=(4, 8))
+                     state="readonly").pack(side="left")
         self.model_var = tk.StringVar(value=cfg.llm.model)
-        ttk.Entry(params, textvariable=self.model_var, width=20).grid(row=0, column=2, padx=(0, 12))
+        ttk.Entry(row0, textvariable=self.model_var, width=16).pack(side="left", padx=(4, 24))
 
-        ttk.Label(params, text="置信度阈值:").grid(row=0, column=3, sticky="w")
+        ttk.Label(row0, text="置信度阈值:").pack(side="left", padx=(0, 4))
         self.threshold_var = tk.StringVar(value=str(cfg.grading.confidence_threshold))
-        ttk.Entry(params, textvariable=self.threshold_var, width=6).grid(row=0, column=4, padx=(4, 12))
+        ttk.Entry(row0, textvariable=self.threshold_var, width=5).pack(side="left", padx=(0, 24))
 
-        ttk.Label(params, text="只跑前N行:").grid(row=0, column=5, sticky="w")
+        ttk.Label(row0, text="并发数:").pack(side="left", padx=(0, 4))
+        self.concurrency_var = tk.StringVar(value=str(cfg.grading.concurrency))
+        ttk.Entry(row0, textvariable=self.concurrency_var, width=5).pack(side="left", padx=(0, 24))
+
+        ttk.Label(row0, text="只跑前N行:").pack(side="left", padx=(0, 4))
         self.max_rows_var = tk.StringVar()
-        ttk.Entry(params, textvariable=self.max_rows_var, width=6).grid(row=0, column=6, padx=(4, 0))
+        ttk.Entry(row0, textvariable=self.max_rows_var, width=6).pack(side="left")
+
+        # 第二行：全部复选框
+        row1 = ttk.Frame(params)
+        row1.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         self.verify_var = tk.BooleanVar(value=False)
         self.skip_id_var = tk.BooleanVar(value=False)
         self.debug_fetch_var = tk.BooleanVar(value=False)
         self.force_rerun_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(params, text="验证模式（不写回 xlsx）",
-                        variable=self.verify_var).grid(row=1, column=0, columnspan=3,
-                                                       sticky="w", pady=(6, 0))
-        ttk.Checkbutton(params, text="跳过题目识别",
-                        variable=self.skip_id_var).grid(row=1, column=3, columnspan=2,
-                                                        sticky="w", pady=(6, 0))
-        ttk.Checkbutton(params, text="每次抓取写转储",
-                        variable=self.debug_fetch_var).grid(row=1, column=5, columnspan=2,
-                                                            sticky="w", pady=(6, 0))
-        ttk.Checkbutton(params, text="忽略已完成行（强制重跑）",
-                        variable=self.force_rerun_var).grid(row=2, column=0, columnspan=3,
-                                                            sticky="w", pady=(2, 0))
+        ttk.Checkbutton(row1, text="验证模式（不写回 xlsx）",
+                        variable=self.verify_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(row1, text="跳过题目识别",
+                        variable=self.skip_id_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(row1, text="每次抓取写转储",
+                        variable=self.debug_fetch_var).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(row1, text="忽略已完成行（强制重跑）",
+                        variable=self.force_rerun_var).pack(side="left")
 
+        # 开始/停止按钮（右侧，垂直居中于两行）
         btns = ttk.Frame(params)
-        btns.grid(row=0, column=7, rowspan=3, padx=(16, 0))
+        btns.grid(row=0, column=1, rowspan=2, padx=(24, 0))
         self.start_btn = ttk.Button(btns, text="▶ 开始", command=self._on_start, state="disabled")
         self.start_btn.grid(row=0, column=0, padx=2)
         self.stop_btn = ttk.Button(btns, text="■ 停止", command=self._on_stop, state="disabled")
@@ -215,6 +226,10 @@ class MonitorView(ttk.Frame):
         cfg.llm.model = self.model_var.get().strip() or cfg.llm.model
         try:
             cfg.grading.confidence_threshold = float(self.threshold_var.get())
+        except ValueError:
+            pass
+        try:
+            cfg.grading.concurrency = max(1, int(self.concurrency_var.get()))
         except ValueError:
             pass
 
