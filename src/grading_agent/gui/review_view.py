@@ -31,7 +31,7 @@ FILTER_ALL = "全部"
 FILTER_PENDING = "待复核"
 FILTER_FAILED = "抓取/解析失败"
 FILTER_DIFF3 = "偏差≥3"
-FILTER_OVERRIDDEN = "已人工改分"
+FILTER_OVERRIDDEN = "已复核"    # 常量名不变（口径仍是 is_overridden），只改展示文案
 
 
 class ReviewView(ttk.Frame):
@@ -240,7 +240,7 @@ class ReviewView(ttk.Frame):
         ttk.Entry(act, textvariable=self.note_var, width=34).grid(
             row=1, column=3, padx=(4, 8), pady=(6, 0))
 
-        self.save_btn = ttk.Button(act, text="保存改分", command=self._on_save, state="disabled")
+        self.save_btn = ttk.Button(act, text="保存评分", command=self._on_save, state="disabled")
         self.save_btn.grid(row=1, column=4, padx=2, pady=(6, 0))
         self.undo_btn = ttk.Button(act, text="撤销改分", command=self._on_undo, state="disabled")
         self.undo_btn.grid(row=1, column=5, padx=2, pady=(6, 0))
@@ -275,7 +275,9 @@ class ReviewView(ttk.Frame):
         override_path = self.output_dir / OVERRIDE_FILENAME
 
         human_scores: dict = {}
+        xlsx_scores: dict = {}
         self._url_by_row = {}
+        xlsx_path = None
         try:
             from grading_agent.agent.orchestrator import _find_xlsx
             from grading_agent.xlsx_io import read_rows, read_scores_by_key
@@ -288,7 +290,22 @@ class ReviewView(ttk.Frame):
             # xlsx 不可读时仍展示 AI 结果（人工分列显示 —）
             pass
 
-        self.rows = build_row_views(detail_path, override_path, human_scores, self._url_by_row)
+        # AI 副本评分列的现值：判"要不要写回"的依据，复用现成的 read_scores_by_key
+        # （按 (answer_id, task_id) 取，与 human_score 同一套口径）。
+        # 独立 try：副本不存在或缺"答卷ID"列都不应影响上面已经读到的东西。
+        if xlsx_path is not None:
+            try:
+                from grading_agent.ai_xlsx import ai_xlsx_path
+                from grading_agent.xlsx_io import read_scores_by_key
+
+                copy_path = ai_xlsx_path(xlsx_path, self.output_dir)
+                if copy_path.exists():
+                    xlsx_scores = read_scores_by_key(copy_path)
+            except Exception:
+                pass
+
+        self.rows = build_row_views(detail_path, override_path, human_scores,
+                                    self._url_by_row, xlsx_scores)
 
         task_ids = sorted({r.task_id for r in self.rows if r.task_id})
         self.task_id_box.configure(values=[FILTER_ALL] + task_ids)
@@ -304,7 +321,8 @@ class ReviewView(ttk.Frame):
         f = self.filter_var.get()
         if f == FILTER_PENDING and r.status(threshold) != "待复核":
             return False
-        if f == FILTER_FAILED and r.parse_ok:
+        if f == FILTER_FAILED and r.status(threshold) != "失败":
+            # 与状态列同源：人工已补分的失败行状态是"已改分"，不该再出现在失败筛选里
             return False
         if f == FILTER_DIFF3:
             d = r.diff
@@ -343,10 +361,15 @@ class ReviewView(ttk.Frame):
             st = r.status(threshold)
             big_diff = d is not None and abs(d) >= 3
             low_conf = st == "待复核"
+            # 置信度后缀按原始置信度显示：已复核的行不再算"待复核"，
+            # 但仍应看得到它当初是因为置信度低才被标出来的。
+            raw_low = r.confidence is not None and r.confidence < threshold
 
             # Treeview 一行只能一种底色，按严重度取最高的一种。
             # 低置信度与大偏差同时成立时用专门的组合 tag，避免偏差信息被吞掉。
-            if not r.parse_ok:
+            # 首行判定与状态列同源（st 而非 parse_ok）：人工补分后的失败行变"已改分"，
+            # 底色应转为已复核，否则标签与颜色互相矛盾。
+            if st == "失败":
                 tag = "failed"
             elif low_conf and big_diff:
                 tag = "pending_bigdiff"
@@ -360,8 +383,8 @@ class ReviewView(ttk.Frame):
                 tag = ""
 
             # 状态列直接标出置信度，低置信度行一眼可辨（不必只靠底色）
-            status_text = ("✎" if r.is_overridden else "") + st
-            if low_conf and r.confidence is not None:
+            status_text = st
+            if raw_low:
                 status_text = f"{status_text} {r.confidence:.2f}"
 
             self.tree.insert("", "end", iid=str(r.row_num),
@@ -375,11 +398,13 @@ class ReviewView(ttk.Frame):
             ))
 
         pending = sum(1 for r in self.rows if r.status(threshold) == "待复核")
-        failed = sum(1 for r in self.rows if not r.parse_ok)
-        changed = sum(1 for r in self.rows if r.is_overridden)
+        failed = sum(1 for r in self.rows if r.status(threshold) == "失败")
+        adopted = sum(1 for r in self.rows if r.is_adopted)
+        edited = sum(1 for r in self.rows if r.is_overridden and not r.is_adopted)
         self.summary_var.set(
             f"共 {len(self.rows)} 行 │ 显示 {len(self.visible)} │ "
-            f"待复核 {pending} │ 失败 {failed} │ 已改分 {changed}"
+            f"待复核 {pending} │ 已复核 {adopted + edited}"
+            f"（采纳 {adopted} / 改分 {edited}）│ 失败 {failed}"
         )
 
     def _sort_by(self, col: str) -> None:
@@ -417,8 +442,11 @@ class ReviewView(ttk.Frame):
     def _render_detail(self, r: RowView) -> None:
         self.head_var.set(f"行{r.row_num} · 答卷ID {r.answer_id or '—'} · "
                           f"题目ID {r.task_id or '—'} · {r.triple or '—'}")
-        self.override_flag.set(
-            f"✎ 已人工改分 {r.override_score}（{r.override_time}）" if r.is_overridden else "")
+        if r.is_overridden:
+            mark = "✓ 已采纳 AI 评分" if r.is_adopted else "✎ 已人工改分"
+            self.override_flag.set(f"{mark} {r.override_score}（{r.override_time}）")
+        else:
+            self.override_flag.set("")
         self.open_btn.configure(state="normal" if r.url else "disabled")
 
         # 题目描述与学生代码：新版 jsonl 已存，旧记录才需重抓
@@ -436,7 +464,7 @@ class ReviewView(ttk.Frame):
         eff = r.effective_score
         parts = [f"AI {r.ai_score if r.ai_score is not None else '—'}"]
         if r.is_overridden:
-            parts.append(f"人工改为 {r.override_score}")
+            parts.append(f"{'已采纳' if r.is_adopted else '人工改为'} {r.override_score}")
         parts.append(f"人工原始 {r.human_score if r.human_score is not None else '—'}")
         if r.diff is not None:
             parts.append(f"偏差 {r.diff:+d}")
@@ -596,10 +624,18 @@ class ReviewView(ttk.Frame):
                     "分数超范围",
                     f"{new_score} 不在 0-{max_score} 范围内，仍要写入吗？"):
                 return
-        if new_score == r.effective_score:
-            self.app.set_status("分数未变化，未写入")
+        # 判据：AI 评分副本里该行是否已经是这个分（而非"分数是否变化"）。
+        # 低置信度行跑批时没写回，副本为空 → 判等不成立 → 输入框预填的 AI 分
+        # 可以正常落盘，这就是"采纳 AI 评分"。
+        if new_score == r.xlsx_score:
+            self.app.set_status(
+                f"行{r.row_num} 在 AI 评分表中已是 {new_score} 分，无需重复写入")
             return
-        self._commit_override(r, new_score, self.note_var.get().strip())
+        note = self.note_var.get().strip()
+        if not note and r.ai_score is not None and new_score == r.ai_score:
+            # 仅在用户没写备注时补默认值，起"改分流水"自解释的作用（替代 kind 字段）
+            note = "采纳 AI 评分"
+        self._commit_override(r, new_score, note)
 
     def _on_undo(self) -> None:
         """撤销 = 追加一条反向记录（回到 AI 原始分），历史完整保留。"""

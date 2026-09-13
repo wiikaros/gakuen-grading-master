@@ -4,6 +4,9 @@
 - grading_detail.jsonl 只由 AI 追加，是断点续跑源与一致性验证基准，人工改分绝不写入
 - human_override.jsonl 只记人工改动流水，追加而非覆写；同一行改两次留两条，最后一条生效
 - 撤销 = 追加一条反向记录（new_score 回到改动前的值），因此历史完整可追溯
+- 同一条流水也承载「采纳 AI 评分」——那种记录的 old_score == new_score。
+  因此它的实际语义是「复核结论流水」：最后一条记录决定该行是采纳还是改分。
+  采纳与改分不落盘 kind 字段，由「最终生效分是否等于 AI 原始分」推导（见 RowView.is_adopted）
 
 为什么分开：consistency.py 只读 grading_detail.jsonl。若把人工修正写进去，
 调完 prompt 重跑验证时一致率会被人工修正虚高，失去衡量 AI 真实水平的意义。
@@ -116,8 +119,14 @@ class RowView:
         """jsonl 是否存有题目描述/学生代码（旧记录没有）。"""
         return bool(self.description or self.student_code)
 
-    # xlsx 里的人工评分（一致性对比用）
+    # xlsx 里的人工评分（一致性对比用）—— 来自 tasks/ 原始表
     human_score: int | None = None
+
+    # AI 评分副本里该行评分列的现值 —— 来自 output/<任务>/<原名>_AI评分.xlsx。
+    # 与 human_score 的区别很关键：human_score 是原始表里真人打的分（对比基准），
+    # xlsx_score 是交付副本里当前的值（高置信度行 = AI 分；低置信度行 = None）。
+    # 它决定"这次保存要不要落盘"：副本已经是这个分，就不必再写一次。
+    xlsx_score: int | None = None
 
     # 人工改动（来自 human_override.jsonl）
     override_score: int | None = None
@@ -134,6 +143,18 @@ class RowView:
         return self.override_score is not None
 
     @property
+    def is_adopted(self) -> bool:
+        """最后一条复核结论是否等于 AI 原始分（= 采纳 AI 评分）。
+
+        不落盘 kind 字段：采纳的判据就是"最终生效分 == AI 原始分"。
+        撤销改分走的正是这条路（_on_undo 把 ai_score 写回），因此它也算采纳。
+        ai_score 为 None（抓取/解析失败）时不可能采纳，只能算人工补分。
+        """
+        return (self.is_overridden
+                and self.ai_score is not None
+                and self.effective_score == self.ai_score)
+
+    @property
     def diff(self) -> int | None:
         """生效分 − 人工原始分。任一缺失返回 None。"""
         eff = self.effective_score
@@ -142,7 +163,13 @@ class RowView:
         return eff - self.human_score
 
     def status(self, threshold: float) -> str:
-        """状态标签，用于表格状态列与着色。"""
+        """状态标签，用于表格状态列与着色（四态）。
+
+        复核结论优先于上游状态：人工已经给过分的行不再算"失败/待复核"，
+        否则待复核清单永远不会随复核推进而收敛（这是本次改造的目的之一）。
+        """
+        if self.is_overridden:
+            return "已采纳" if self.is_adopted else "已改分"
         if not self.parse_ok:
             return "失败"
         if self.ai_score is None:
@@ -177,19 +204,22 @@ def build_row_views(
     override_path: Path,
     human_scores: dict[tuple[str, str], int | None] | None = None,
     url_by_row: dict[int, str] | None = None,
+    xlsx_scores: dict[tuple[str, str], int | None] | None = None,
 ) -> list[RowView]:
     """合并三方数据成表格视图，按 row_num 升序。
 
     Args:
         detail_path: grading_detail.jsonl（AI 输出）
         override_path: human_override.jsonl（人工改动）
-        human_scores: read_scores_by_key() 的结果 {(answer_id, task_id): 人工分}
+        human_scores: read_scores_by_key() 的结果 {(answer_id, task_id): 人工分}，读原始表
         url_by_row: {row_num: url}，来自 xlsx，供「打开网页」按钮用
+        xlsx_scores: read_scores_by_key() 的结果，读 **AI 评分副本**，填 xlsx_score
 
     同一 row_num 多条 AI 记录时取最后一条（最近一次评分结果）。
     """
     human_scores = human_scores or {}
     url_by_row = url_by_row or {}
+    xlsx_scores = xlsx_scores or {}
 
     by_row: dict[int, RowView] = {}
     for rec in read_detail_rows(detail_path):
@@ -217,6 +247,7 @@ def build_row_views(
             description=str(rec.get("description") or ""),
             student_code=str(rec.get("student_code") or ""),
             human_score=human_scores.get((answer_id, task_id)),
+            xlsx_score=xlsx_scores.get((answer_id, task_id)),
         )
 
     # 叠加人工改动
@@ -231,6 +262,7 @@ def build_row_views(
                 url=url_by_row.get(rn, ""),
             )
             view.human_score = human_scores.get((view.answer_id, view.task_id))
+            view.xlsx_score = xlsx_scores.get((view.answer_id, view.task_id))
             by_row[rn] = view
         view.override_score = rec.get("new_score")
         view.override_note = str(rec.get("note", ""))
