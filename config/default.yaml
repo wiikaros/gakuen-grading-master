@@ -4,7 +4,7 @@ playwright:
   wait_until: networkidle
 llm:
   provider: deepseek
-  model: deepseek-v4-flash
+  model: deepseek-flash
   temperature: 0.0
   max_retries: 3
 grading:
