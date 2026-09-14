@@ -168,45 +168,20 @@ def save_workbook(wb, path: Path) -> Path:
         return fallback
 
 
-def read_scores_by_key(path: Path) -> dict[tuple[str, str], int | None]:
-    """按 (answer_id, task_id) 联合主键读取人工评分，用于一致性验证对比。
-
-    返回 {(answer_id, task_id): score_int_or_None}。非数字评分（如"打不开"）→ None。
-
-    说明：answer_id 在 xlsx 中并非每行唯一——一份答卷（一个 answer_id）可能含 2 道题，
-    出现 2 行（不同 task_id、不同 url）。因此用 (answer_id, task_id) 联合主键唯一定位行。
-    """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(path)
-    sheet = wb.active
-    headers = [cell.value for cell in sheet[1]]
-    layout = detect_layout(headers)
-
-    if layout.answer_id_col_idx is None:
-        raise ValueError("xlsx 缺少答卷ID列，无法按 (answer_id, task_id) 做对比")
-
-    result: dict[tuple[str, str], int | None] = {}
-    for row in range(2, sheet.max_row + 1):
-        answer_id = sheet.cell(row=row, column=layout.answer_id_col_idx).value
-        task_id = sheet.cell(row=row, column=layout.task_id_col_idx).value
-        if answer_id is None:
-            continue
-        raw_score = sheet.cell(row=row, column=layout.score_col_idx).value
-        result[(str(answer_id), str(task_id) if task_id is not None else "")] = to_int_score(raw_score)
-    return result
-
-
 def read_scores_by_row(path: Path) -> dict[int, int | None]:
     """按行号读取评分列：{row_num: 分数或 None}。
 
-    与 read_scores_by_key 的区别在键。后者按 (answer_id, task_id) 建键，而该联合键
-    在真实数据里并非唯一——9.13 的 rows 849/850 同键、单元格分别是 12 / 13，塌成
-    一条后两行会取到同一个值。写入本来是按 row_num 寻址的
-    （update_cell_in_memory(sheet, row_num, ...)），按行读才是同一口径。
+    读取评分列的唯一入口——人工评分对比、复核界面的偏差列与"副本现值"都用它。
+    写入本来也按 row_num 寻址（update_cell_in_memory(sheet, row_num, ...)），
+    读写同口径。
 
-    用于复核界面判断"副本该行现在是什么分"。非数字文本（如 '25（疑似AI）'）与空
-    格一律 → None，与 to_int_score 的口径一致。
+    为什么不用 (answer_id, task_id) 联合主键：该键在真实数据里并非唯一
+    （9.13 的 rows 849/850 同键、单元格分别是 12 / 13，塌成一条后两行会取到同一个
+    值）；一致性对比还因此在并发下出现过错配——AI 侧按 jsonl 完成顺序取最后一条、
+    人工侧按行序取最后一个同键行，实测 9.13 该键在 jsonl 里是 [850, 849]，两侧会
+    分别落到 849 与 850。
+
+    空格与非数字文本（如 '25（疑似AI）'）一律 → None。
     """
     from openpyxl import load_workbook
 

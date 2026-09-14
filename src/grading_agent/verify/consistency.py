@@ -3,8 +3,13 @@
 PRD §13 核心原则：智能体不看 G 列（TaskRow 不含 score，read_rows(skip_score=True)）。
 验证流程跑完后，才读人工评分做对比。
 
-对比按 (answer_id, task_id) 联合主键 join——answer_id 在 xlsx 中并非每行唯一
-（一份答卷含 2 道题时出现 2 行），联合 task_id 才能唯一定位行。
+对比按 **row_num** join：jsonl 每条记录都带行号（写入时用的就是同一张表的行号），
+xlsx 侧也按行号读，两边口径一致。
+
+为什么不用 (answer_id, task_id)：该联合键**并非唯一**。9.13 的 rows 849/850 同键，
+而并发下 jsonl 的完成顺序与行序不同（实测该键在 jsonl 里是 [850, 849]）——AI 侧取
+"最后写入的一条"会落到 849、人工侧取"最后一个同键行"会落到 850，于是拿 A 行的 AI
+分去比 B 行的人工分。按 row_num 后，这类塌键与错配都不存在。
 """
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from grading_agent.xlsx_io import read_scores_by_key, to_int_score
+from grading_agent.xlsx_io import read_scores_by_row, to_int_score
 
 
 @dataclass
@@ -67,11 +72,11 @@ def run_consistency_check(
         return VerificationReport()
     xlsx_path = xlsx_candidates[0]
 
-    # 读人工评分（此时才读 G 列）：{(answer_id, task_id): score}
-    human_scores = read_scores_by_key(xlsx_path)
+    # 读人工评分（此时才读 G 列）：{row_num: 分数或 None}
+    human_scores = read_scores_by_row(xlsx_path)
 
-    # 读 AI 评分明细 JSONL
-    ai_scores: dict[tuple[str, str], dict] = {}
+    # 读 AI 评分明细 JSONL，按行号索引（每条记录都带 row_num）
+    ai_scores: dict[int, dict] = {}
     fetch_failed = 0
     llm_failed = 0
     if detail_log_path.exists():
@@ -84,10 +89,13 @@ def run_consistency_check(
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                key = (str(rec.get("answer_id", "")), str(rec.get("task_id", "")))
-                ai_scores[key] = rec
                 if not rec.get("parse_ok", True):
                     llm_failed += 1
+                rn = rec.get("row_num")
+                if not isinstance(rn, int):
+                    # 早期记录没有行号，无法按行对比，跳过
+                    continue
+                ai_scores[rn] = rec
 
     # 对比
     report = VerificationReport(fetch_failed=fetch_failed, llm_failed=llm_failed)
@@ -95,14 +103,16 @@ def run_consistency_check(
     by_task_accum: dict[str, list[int]] = defaultdict(list)
     by_band_accum: dict[str, list[int]] = defaultdict(list)
 
-    all_keys = set(human_scores.keys()) | set(ai_scores.keys())
-    for key in all_keys:
-        ai_rec = ai_scores.get(key)
-        human_score = human_scores.get(key)
+    all_rows = set(human_scores.keys()) | set(ai_scores.keys())
+    for rn in all_rows:
+        ai_rec = ai_scores.get(rn)
+        human_score = human_scores.get(rn)
 
         if ai_rec is None:
-            # 人工有评分但 AI 没评
-            report.human_only += 1
+            # 人工有评分但 AI 没评。空格子不算"有评分"——否则这一项会与它的标签不符
+            # （read_scores_by_row 会为每一行都建条目，空格的值为 None）。
+            if human_score is not None:
+                report.human_only += 1
             continue
         if not ai_rec.get("parse_ok", True):
             # AI 评分失败，跳过对比
@@ -128,8 +138,8 @@ def run_consistency_check(
         if diff == 0:
             report.exact_match += 1
 
-        # 按题目ID分组
-        task_id = key[1]
+        # 按题目ID分组（题目ID 从 AI 记录取；人工表侧不再参与 join 键）
+        task_id = str(ai_rec.get("task_id", ""))
         by_task_accum[task_id].append(abs_err)
         # 按人工评分分档
         band = _score_band(human_score)

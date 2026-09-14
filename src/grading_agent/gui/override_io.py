@@ -202,7 +202,7 @@ def read_detail_rows(path: Path) -> list[dict]:
 def build_row_views(
     detail_path: Path,
     override_path: Path,
-    human_scores: dict[tuple[str, str], int | None] | None = None,
+    human_scores: dict[int, int | None] | None = None,
     url_by_row: dict[int, str] | None = None,
     xlsx_scores: dict[int, int | None] | None = None,
 ) -> list[RowView]:
@@ -211,7 +211,7 @@ def build_row_views(
     Args:
         detail_path: grading_detail.jsonl（AI 输出）
         override_path: human_override.jsonl（人工改动）
-        human_scores: read_scores_by_key() 的结果 {(answer_id, task_id): 人工分}，读原始表
+        human_scores: read_scores_by_row() 的结果 {row_num: 人工分}，读原始表（对比基准）
         url_by_row: {row_num: url}，来自 xlsx，供「打开网页」按钮用
         xlsx_scores: read_scores_by_row() 的结果 {row_num: 分数}，读 **AI 评分副本**，
             填 xlsx_score。按行号取——与写回时的寻址口径一致
@@ -247,7 +247,7 @@ def build_row_views(
             timestamp=str(rec.get("timestamp", "")),
             description=str(rec.get("description") or ""),
             student_code=str(rec.get("student_code") or ""),
-            human_score=human_scores.get((answer_id, task_id)),
+            human_score=human_scores.get(rn),
             xlsx_score=xlsx_scores.get(rn),
         )
 
@@ -262,7 +262,7 @@ def build_row_views(
                 task_id=str(rec.get("task_id", "")),
                 url=url_by_row.get(rn, ""),
             )
-            view.human_score = human_scores.get((view.answer_id, view.task_id))
+            view.human_score = human_scores.get(rn)
             view.xlsx_score = xlsx_scores.get(rn)
             by_row[rn] = view
         view.override_score = rec.get("new_score")

@@ -280,10 +280,11 @@ class ReviewView(ttk.Frame):
         xlsx_path = None
         try:
             from grading_agent.agent.orchestrator import _find_xlsx
-            from grading_agent.xlsx_io import read_rows, read_scores_by_key
+            from grading_agent.xlsx_io import read_rows, read_scores_by_row
 
             xlsx_path = _find_xlsx(self.task_dir)
-            human_scores = read_scores_by_key(xlsx_path)
+            # 按行号读人工评分：与写回寻址口径一致（联合主键并非唯一，见 xlsx_io 注释）
+            human_scores = read_scores_by_row(xlsx_path)
             rows, _layout, _wb = read_rows(xlsx_path, skip_score=True)
             self._url_by_row = {r.row_num: r.url for r in rows}
         except Exception:
@@ -570,7 +571,7 @@ class ReviewView(ttk.Frame):
 
         副本位于 output/<任务>/<原名>_AI评分.xlsx，不存在时从原始表复制。
         绝不写 tasks/ 下的原始表——那里存着真人评分，既是交付基准，
-        也是 read_scores_by_key() 读取的一致性对比来源（写了会让偏差恒为 0）。
+        也是复核界面读人工评分（偏差列的对比基准）的来源（写了会让偏差恒为 0）。
 
         返回 None 表示用户在「覆盖评分列里的文本」确认框中选择取消——调用方
         应中止本次操作（既不写文件，也不记 human_override 流水）。
