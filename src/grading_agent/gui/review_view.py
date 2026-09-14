@@ -588,11 +588,16 @@ class ReviewView(ttk.Frame):
         old = r.effective_score
         source = "human" if r.is_overridden else "ai"
 
-        try:
-            saved_to = self._write_xlsx_score(r.row_num, new_score)
-        except Exception as exc:
-            messagebox.showerror("写入 xlsx 失败", f"{type(exc).__name__}: {exc}")
-            return
+        # 副本该行已经是这个分（例如跑批时勾选了「写入待复核评分」）→ 只记复核结论，
+        # 不重复写文件。"写回 xlsx"与"记录人工结论"是两件事，不能因为不用写就跳过记录。
+        already_written = (new_score == r.xlsx_score)
+        saved_to = None
+        if not already_written:
+            try:
+                saved_to = self._write_xlsx_score(r.row_num, new_score)
+            except Exception as exc:
+                messagebox.showerror("写入 xlsx 失败", f"{type(exc).__name__}: {exc}")
+                return
 
         append_override(
             override_path,
@@ -600,9 +605,12 @@ class ReviewView(ttk.Frame):
             old_score=old, new_score=new_score, source=source, note=note,
         )
 
-        tip = f"行{r.row_num} 已改为 {new_score} 分"
-        if saved_to is not None and saved_to.name.endswith("_autosave.xlsx"):
-            tip += f"（原文件被占用，已另存为 {saved_to.name}）"
+        if already_written:
+            tip = f"行{r.row_num} 在 AI 评分表中已是 {new_score} 分，仅记录复核结论"
+        else:
+            tip = f"行{r.row_num} 已改为 {new_score} 分"
+            if saved_to is not None and saved_to.name.endswith("_autosave.xlsx"):
+                tip += f"（原文件被占用，已另存为 {saved_to.name}）"
         self.app.set_status(tip)
 
         self.reload()
@@ -624,13 +632,9 @@ class ReviewView(ttk.Frame):
                     "分数超范围",
                     f"{new_score} 不在 0-{max_score} 范围内，仍要写入吗？"):
                 return
-        # 判据：AI 评分副本里该行是否已经是这个分（而非"分数是否变化"）。
-        # 低置信度行跑批时没写回，副本为空 → 判等不成立 → 输入框预填的 AI 分
-        # 可以正常落盘，这就是"采纳 AI 评分"。
-        if new_score == r.xlsx_score:
-            self.app.set_status(
-                f"行{r.row_num} 在 AI 评分表中已是 {new_score} 分，无需重复写入")
-            return
+        # 是否重复写文件由 _commit_override 判断（副本已是该分时只记结论、不写文件）。
+        # 这里不能提前 return：勾选「写入待复核评分」后低置信度行的副本已有分，
+        # 若在此拦掉，人工确认就记不下来，该行会永远停在"待复核"。
         note = self.note_var.get().strip()
         if not note and r.ai_score is not None and new_score == r.ai_score:
             # 仅在用户没写备注时补默认值，起"改分流水"自解释的作用（替代 kind 字段）

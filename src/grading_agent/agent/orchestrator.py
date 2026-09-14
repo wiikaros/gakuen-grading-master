@@ -81,6 +81,7 @@ class _RunState:
     fetch_failed: int = 0
     high_confidence_written: int = 0
     low_confidence_queued: int = 0
+    low_confidence_written: int = 0
     review_rows: list[dict] = field(default_factory=list)
     aborted: bool = False
 
@@ -103,6 +104,7 @@ class Orchestrator:
         event_fn: Callable[[dict], None] | None = None,
         should_stop: "threading.Event | None" = None,
         output_root: Path | None = None,
+        write_low_confidence: bool = False,
     ) -> None:
         self.task_dir = task_dir
         self.config = config
@@ -111,6 +113,10 @@ class Orchestrator:
         self.skip_identification = skip_identification
         self.verify = verify
         self.force_rerun = force_rerun
+        # 低置信度（待复核）行是否也写回 xlsx。默认 False = 保持原行为：
+        # 不写回、只进 review_queue，等人工复核后再落盘。
+        # 勾选后这些行的分数会随跑批一并写入副本，但仍标记为"待复核"。
+        self.write_low_confidence = write_low_confidence
         self.input_fn = input_fn
         self.print_fn = print_fn
         self.event_fn = event_fn
@@ -221,6 +227,11 @@ class Orchestrator:
                 return self._fail_report()
             self._log(f"  AI 评分写入: {ai_xlsx}")
             self._log(f"  原始 xlsx 只读，不会被修改")
+            if not self.write_low_confidence:
+                # 只影响本次写回，不会清理副本里的既有内容：上次勾选跑批留下的分仍在，
+                # 交付前需知道"空单元格 ≠ 一定未复核"。
+                self._log("  低置信度行不写回（勾选「写入待复核评分」可改变）；"
+                          "副本中这些行可能保留上次写入的分")
 
         # 收集题目ID
         task_ids = []
@@ -399,6 +410,9 @@ class Orchestrator:
         )
         self._log(f"\n  已写回评分: {report.high_confidence_written} 行 (高置信度)")
         self._log(f"  待复核: {report.low_confidence_queued} 行")
+        if state.low_confidence_written:
+            self._log(f"  其中已写回: {state.low_confidence_written} 行 "
+                      f"(低置信度，仍需人工复核)")
         self._log(f"  抓取失败: {report.fetch_failed} 行")
         self._emit("finished",
                    total_rows=report.total_rows,
@@ -492,15 +506,23 @@ class Orchestrator:
                 _outcome, _written = "verify_ok", False
             else:
                 state.low_confidence_queued += 1
+                # review_queue 记录始终保留：它才是复核工作清单，
+                # 与"分数是否已写进副本"是两件事。
                 state.review_rows.append({
                     "row_num": row.row_num, "answer_id": row.answer_id,
                     "task_id": row.task_id, "url": row.url,
                     "confidence": result.confidence, "ai_total_score": result.total_score,
                     "reason": "low_confidence", "reasoning": result.reasoning,
                 })
+                write_low = self.write_low_confidence and not self.verify
+                if write_low:
+                    update_cell_in_memory(wb.active, row.row_num,
+                                          layout.score_col_idx, result.total_score)
+                    state.low_confidence_written += 1
+                tail = "待复核（已写回）" if write_low else "留空"
                 self._log(f"  [{done}/{total}] 行{row.row_num} 题目ID={row.task_id} "
-                          f"评分: {result.total_score} (conf {result.confidence:.2f}) → ⚠ 留空")
-                _outcome, _written = "low_confidence", False
+                          f"评分: {result.total_score} (conf {result.confidence:.2f}) → ⚠ {tail}")
+                _outcome, _written = "low_confidence", write_low
 
             self._emit("row_done", index=done, total=total, row_num=row.row_num,
                        task_id=row.task_id, answer_id=row.answer_id,
@@ -675,6 +697,9 @@ class Orchestrator:
             "fetch_failed": state.fetch_failed,
             "high_confidence_written": state.high_confidence_written,
             "low_confidence_queued": state.low_confidence_queued,
+            # 低置信度也写回的行数。单独计数，不并入 high_confidence_written——
+            # 否则"已写回"里会混进未经人工确认的分，读日志的人会误判。
+            "low_confidence_written": state.low_confidence_written,
         }
 
     def _smoke_test(

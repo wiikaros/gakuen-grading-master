@@ -101,6 +101,8 @@ class MonitorView(ttk.Frame):
         self.skip_id_var = tk.BooleanVar(value=False)
         self.debug_fetch_var = tk.BooleanVar(value=False)
         self.force_rerun_var = tk.BooleanVar(value=False)
+        # 默认不勾 = 与历史行为一致：低置信度行留空，等人工复核后再落盘
+        self.write_low_conf_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row1, text="验证模式（不写回 xlsx）",
                         variable=self.verify_var).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(row1, text="跳过题目识别",
@@ -108,7 +110,11 @@ class MonitorView(ttk.Frame):
         ttk.Checkbutton(row1, text="每次抓取写转储",
                         variable=self.debug_fetch_var).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(row1, text="忽略已完成行（强制重跑）",
-                        variable=self.force_rerun_var).pack(side="left")
+                        variable=self.force_rerun_var).pack(side="left", padx=(0, 12))
+        # 勾选后低置信度行的分也会写进 xlsx 副本，但仍标为"待复核"。
+        # 注意：只影响本次写回，不会补写历史行、也不清空副本里的旧分。
+        ttk.Checkbutton(row1, text="写入待复核评分",
+                        variable=self.write_low_conf_var).pack(side="left")
 
         # 开始/停止按钮（右侧，垂直居中于两行）
         btns = ttk.Frame(params)
@@ -266,6 +272,15 @@ class MonitorView(ttk.Frame):
                 self.app.release_busy(BUSY_OWNER)
                 return
 
+        # 验证模式完全不写盘，「写入待复核评分」在本次无效——提前说清，
+        # 避免用户以为勾了却没生效。
+        if self.verify_var.get() and self.write_low_conf_var.get():
+            messagebox.showinfo(
+                "验证模式不写回",
+                "已勾选「验证模式（不写回 xlsx）」，本次跑批不会写任何分数，\n"
+                "「写入待复核评分」在本次不生效。",
+            )
+
         self._clear_log()
         self._done_count = 0
         self._total = 0
@@ -282,6 +297,7 @@ class MonitorView(ttk.Frame):
             verify=self.verify_var.get(),
             force_rerun=self.force_rerun_var.get(),
             output_root=self.app.output_root,
+            write_low_confidence=self.write_low_conf_var.get(),
         )
         self.runner.start()
         self.start_btn.configure(state="disabled")
@@ -348,8 +364,13 @@ class MonitorView(ttk.Frame):
                 remain = per * (total - idx)
                 eta = f" │ 剩约 {int(remain // 60)}:{int(remain % 60):02d}"
             self.progress_text.set(f"{idx}/{total}")
+            # 低置信度也写回时单独标注，避免与高置信度的"已写回"混为一个数
+            lw = stats.get("low_confidence_written", 0)
+            written_text = f"{stats.get('high_confidence_written', 0)}"
+            if lw:
+                written_text += f"+{lw}(待复核)"
             self.stats_var.set(
-                f"已写回 {stats.get('high_confidence_written', 0)} │ "
+                f"已写回 {written_text} │ "
                 f"待复核 {stats.get('low_confidence_queued', 0)} │ "
                 f"抓取失败 {stats.get('fetch_failed', 0)} │ "
                 f"用时 {int(elapsed // 60)}:{int(elapsed % 60):02d}{eta}"

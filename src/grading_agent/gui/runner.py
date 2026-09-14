@@ -71,6 +71,7 @@ class MonitorRunner:
         verify: bool = False,
         force_rerun: bool = False,
         output_root: Path | None = None,
+        write_low_confidence: bool = False,
     ) -> None:
         self.task_dir = task_dir
         self.config = config
@@ -80,6 +81,7 @@ class MonitorRunner:
         self.verify = verify
         self.force_rerun = force_rerun
         self.output_root = output_root
+        self.write_low_confidence = write_low_confidence
 
         self._msg_q: "queue.Queue[tuple[str, Any]]" = queue.Queue()
         self._stop = threading.Event()
@@ -168,6 +170,7 @@ class MonitorRunner:
                 event_fn=self._event_fn,
                 should_stop=self._stop,
                 output_root=self.output_root,
+                write_low_confidence=self.write_low_confidence,
             )
             # 落盘 run.log：GUI 日志区只在内存里，跑完关窗就没了。
             # 以追加方式写，每次跑批前加一条分隔标头，便于回溯历次运行。
@@ -177,7 +180,8 @@ class MonitorRunner:
                 log_fp.write(f"\n{'=' * 60}\n[{_now()}] 开始跑批 "
                              f"task={self.task_dir.name} "
                              f"model={self.config.llm.provider}/{self.config.llm.model} "
-                             f"max_rows={self.max_rows} verify={self.verify}\n")
+                             f"max_rows={self.max_rows} verify={self.verify} "
+                             f"write_low_conf={self.write_low_confidence}\n")
                 log_fp.flush()
                 self._log_fp = log_fp
             except Exception:

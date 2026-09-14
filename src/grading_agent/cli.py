@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=int, default=None,
                         help="阶段C并发 worker 数（默认从 config 读，config 默认 8；1=串行）")
     parser.add_argument("--verify", action="store_true", help="一致性验证模式(不写回xlsx)")
+    parser.add_argument("--write-low-confidence", action="store_true",
+                        help="低置信度（待复核）行也写回 xlsx；默认不写，等人工复核后再落盘")
     return parser
 
 
@@ -91,6 +93,11 @@ def main() -> int:
         print(f"  限制: 仅前 {args.max_rows} 行")
     if args.skip_identification:
         print(f"  选项: 跳过题目识别（从 JSONL 恢复）")
+    if args.write_low_confidence:
+        if args.verify:
+            print(f"  提示: --verify 不写盘，--write-low-confidence 本次被忽略")
+        else:
+            print(f"  选项: 低置信度行也写回（仍标记为待复核）")
     print(f"=" * 60)
 
     orchestrator = Orchestrator(
@@ -101,6 +108,7 @@ def main() -> int:
         skip_identification=args.skip_identification,
         verify=args.verify,
         force_rerun=args.force_rerun,
+        write_low_confidence=args.write_low_confidence,
     )
 
     try:
