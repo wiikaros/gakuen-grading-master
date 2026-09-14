@@ -66,10 +66,6 @@ def main() -> int:
     if args.concurrency is not None:
         config.grading.concurrency = max(1, args.concurrency)
 
-    # verify 模式下默认不写回
-    if args.verify:
-        config.grading.write_back = False
-
     # API key 校验
     if config.llm.provider == "deepseek" and not config.deepseek_api_key:
         print("❌ 未配置 DEEPSEEK_API_KEY，请复制 .env.example 为 .env 并填入 API key", file=sys.stderr)

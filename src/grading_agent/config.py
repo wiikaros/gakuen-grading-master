@@ -31,7 +31,6 @@ class LLMConfig:
 @dataclass
 class GradingConfig:
     confidence_threshold: float = 0.7
-    write_back: bool = True
     max_score: int = 25
     xlsx_save_interval: int = 50
     concurrency: int = 8

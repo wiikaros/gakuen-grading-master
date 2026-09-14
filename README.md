@@ -300,7 +300,6 @@ llm:
 
 grading:
   confidence_threshold: 0.8         # 高/低置信度分流阈值
-  write_back: true                  # 是否回写 xlsx（verify 模式会被强制关闭）
   max_score: 25                     # GUI 人工改分范围上限（总分上限实际由各题维度满分之和动态决定）
   xlsx_save_interval: 50            # 每 N 行持久化一次 xlsx（断点续跑间隔）
   concurrency: 4                    # 阶段 C 并发 worker 数；1=串行；建议 4-8
@@ -329,7 +328,6 @@ output:
 | `llm.temperature` | 采样温度 | `0.0` | 固定 0 保证可复现，**不要改** |
 | `llm.max_retries` | LLM 重试次数 | `3` | 网络不稳可调大 |
 | `grading.confidence_threshold` | 置信度阈值 | `0.8` | 调高→更多行进人工复核、更保守；调低→更多行自动写回 |
-| `grading.write_back` | 是否回写 xlsx | `true` | 一般不改；`--verify` 会自动关 |
 | `grading.max_score` | GUI 改分范围上限 | `25` | 若题目总分上限非 25，需同步改（否则 GUI 改分校验不符） |
 | `grading.xlsx_save_interval` | 定期保存间隔（行） | `50` | 断点续跑粒度，越小越不易丢但越慢 |
 | `grading.concurrency` | 并发 worker 数 | `4` | 建议 4–8；过高可能触发 API 限流 |
