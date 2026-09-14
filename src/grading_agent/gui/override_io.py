@@ -204,7 +204,7 @@ def build_row_views(
     override_path: Path,
     human_scores: dict[tuple[str, str], int | None] | None = None,
     url_by_row: dict[int, str] | None = None,
-    xlsx_scores: dict[tuple[str, str], int | None] | None = None,
+    xlsx_scores: dict[int, int | None] | None = None,
 ) -> list[RowView]:
     """合并三方数据成表格视图，按 row_num 升序。
 
@@ -213,7 +213,8 @@ def build_row_views(
         override_path: human_override.jsonl（人工改动）
         human_scores: read_scores_by_key() 的结果 {(answer_id, task_id): 人工分}，读原始表
         url_by_row: {row_num: url}，来自 xlsx，供「打开网页」按钮用
-        xlsx_scores: read_scores_by_key() 的结果，读 **AI 评分副本**，填 xlsx_score
+        xlsx_scores: read_scores_by_row() 的结果 {row_num: 分数}，读 **AI 评分副本**，
+            填 xlsx_score。按行号取——与写回时的寻址口径一致
 
     同一 row_num 多条 AI 记录时取最后一条（最近一次评分结果）。
     """
@@ -247,7 +248,7 @@ def build_row_views(
             description=str(rec.get("description") or ""),
             student_code=str(rec.get("student_code") or ""),
             human_score=human_scores.get((answer_id, task_id)),
-            xlsx_score=xlsx_scores.get((answer_id, task_id)),
+            xlsx_score=xlsx_scores.get(rn),
         )
 
     # 叠加人工改动
@@ -262,7 +263,7 @@ def build_row_views(
                 url=url_by_row.get(rn, ""),
             )
             view.human_score = human_scores.get((view.answer_id, view.task_id))
-            view.xlsx_score = xlsx_scores.get((view.answer_id, view.task_id))
+            view.xlsx_score = xlsx_scores.get(rn)
             by_row[rn] = view
         view.override_score = rec.get("new_score")
         view.override_note = str(rec.get("note", ""))

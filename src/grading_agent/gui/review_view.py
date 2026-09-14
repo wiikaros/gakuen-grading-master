@@ -290,17 +290,19 @@ class ReviewView(ttk.Frame):
             # xlsx 不可读时仍展示 AI 结果（人工分列显示 —）
             pass
 
-        # AI 副本评分列的现值：判"要不要写回"的依据，复用现成的 read_scores_by_key
-        # （按 (answer_id, task_id) 取，与 human_score 同一套口径）。
+        # AI 副本评分列的现值：判"要不要写回"的依据。
+        # 用 read_scores_by_row 按行号取——副本里 (answer_id, task_id) 并非唯一
+        # （9.13 的 rows 849/850 同键、单元格 12/13），按联合主键取会让两行塌成
+        # 同一个值；而写回本来就是按 row_num 寻址的。
         # 独立 try：副本不存在或缺"答卷ID"列都不应影响上面已经读到的东西。
         if xlsx_path is not None:
             try:
                 from grading_agent.ai_xlsx import ai_xlsx_path
-                from grading_agent.xlsx_io import read_scores_by_key
+                from grading_agent.xlsx_io import read_scores_by_row
 
                 copy_path = ai_xlsx_path(xlsx_path, self.output_dir)
                 if copy_path.exists():
-                    xlsx_scores = read_scores_by_key(copy_path)
+                    xlsx_scores = read_scores_by_row(copy_path)
             except Exception:
                 pass
 
@@ -569,15 +571,33 @@ class ReviewView(ttk.Frame):
         副本位于 output/<任务>/<原名>_AI评分.xlsx，不存在时从原始表复制。
         绝不写 tasks/ 下的原始表——那里存着真人评分，既是交付基准，
         也是 read_scores_by_key() 读取的一致性对比来源（写了会让偏差恒为 0）。
+
+        返回 None 表示用户在「覆盖评分列里的文本」确认框中选择取消——调用方
+        应中止本次操作（既不写文件，也不记 human_override 流水）。
         """
         from grading_agent.agent.orchestrator import _find_xlsx
         from grading_agent.ai_xlsx import ensure_ai_xlsx
-        from grading_agent.xlsx_io import read_rows, save_workbook, update_cell_in_memory
+        from grading_agent.xlsx_io import (
+            read_rows,
+            save_workbook,
+            to_int_score,
+            update_cell_in_memory,
+        )
 
         assert self.task_dir is not None and self.output_dir is not None
         source = _find_xlsx(self.task_dir)
         target = ensure_ai_xlsx(source, self.output_dir)
         _rows, layout, wb = read_rows(target, skip_score=True)
+        current = wb.active.cell(row=row_num, column=layout.score_col_idx).value
+        if current not in (None, "") and to_int_score(current) is None:
+            # 评分列里可能是人工写在表里的批注（如 '25（疑似AI）'）。这类文本按
+            # to_int_score 视为"无分"，直接写会无声抹掉它，所以先问一次。
+            if not messagebox.askyesno(
+                    "覆盖评分列里的文本？",
+                    f"行{row_num} 的「阅卷人评分」格当前是文本：{current!r}\n\n"
+                    f"写入 {score} 会覆盖它。若这是批注，建议改写到「备注」栏——"
+                    f"备注会存进 human_override.jsonl，不占评分列。\n\n仍要覆盖吗？"):
+                return None
         update_cell_in_memory(wb.active, row_num, layout.score_col_idx, score)
         return save_workbook(wb, target)
 
@@ -597,6 +617,11 @@ class ReviewView(ttk.Frame):
                 saved_to = self._write_xlsx_score(r.row_num, new_score)
             except Exception as exc:
                 messagebox.showerror("写入 xlsx 失败", f"{type(exc).__name__}: {exc}")
+                return
+            if saved_to is None:
+                # 用户在"覆盖评分列里的文本"确认框里取消了：整件事作废，不记流水
+                self.app.set_status(
+                    f"行{r.row_num} 未写入：已取消覆盖评分列里的文本标注")
                 return
 
         append_override(
@@ -657,6 +682,10 @@ class ReviewView(ttk.Frame):
             saved_to = self._write_xlsx_score(r.row_num, r.ai_score)
         except Exception as exc:
             messagebox.showerror("写入 xlsx 失败", f"{type(exc).__name__}: {exc}")
+            return
+        if saved_to is None:
+            # 用户在"覆盖评分列里的文本"确认框里取消了：撤销整体作废
+            self.app.set_status(f"行{r.row_num} 未撤销：已取消覆盖评分列里的文本标注")
             return
         append_override(
             self.output_dir / OVERRIDE_FILENAME,

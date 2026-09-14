@@ -197,6 +197,30 @@ def read_scores_by_key(path: Path) -> dict[tuple[str, str], int | None]:
     return result
 
 
+def read_scores_by_row(path: Path) -> dict[int, int | None]:
+    """按行号读取评分列：{row_num: 分数或 None}。
+
+    与 read_scores_by_key 的区别在键。后者按 (answer_id, task_id) 建键，而该联合键
+    在真实数据里并非唯一——9.13 的 rows 849/850 同键、单元格分别是 12 / 13，塌成
+    一条后两行会取到同一个值。写入本来是按 row_num 寻址的
+    （update_cell_in_memory(sheet, row_num, ...)），按行读才是同一口径。
+
+    用于复核界面判断"副本该行现在是什么分"。非数字文本（如 '25（疑似AI）'）与空
+    格一律 → None，与 to_int_score 的口径一致。
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path)
+    sheet = wb.active
+    headers = [cell.value for cell in sheet[1]]
+    layout = detect_layout(headers)
+
+    result: dict[int, int | None] = {}
+    for row in range(2, sheet.max_row + 1):
+        result[row] = to_int_score(sheet.cell(row=row, column=layout.score_col_idx).value)
+    return result
+
+
 def to_int_score(v) -> int | None:
     """评分转换：处理字符串型数字，跳过非数字（如"打不开"）。
 
